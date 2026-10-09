@@ -48,7 +48,7 @@ SOFT_LIB  = .
 
 # ================= 第三方依赖（按需启用）=================
 # 国密密码库 Tongsuo（铜锁）：只有 lib_src/l_1/q_crypto 需要链接
-TONGSUO_HOME ?= $(SOFT_HOME)/open_src/tongsuo
+TONGSUO_HOME ?= $(SOFT_HOME)/tongsuo
 LIB_CRYPTO    = -lssl -lcrypto
 
 # 视频解码（按需）
@@ -61,29 +61,38 @@ EXT_LIB  = $(TONGSUO_HOME)/lib
 # ==============================================
 #  核心编译参数
 # ==============================================
+# 公共编译参数（库与可执行程序共用）：包含路径、优化、告警、栈保护、宏定义
+# 注意：此处不含 -fPIE / -fPIC / -pie，这些按“库 / 可执行程序”分类放到下方专用变量
 CFLAGS = -I$(INCLUDE) -I$(INCLUDE) \
          -I$(SOFT_INCL) -I$(EXT_INCL) -I. \
-         -g -O2 -m64 -std=c99 \
-         -fPIE -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
-         -Wall -Wcast-align -Wwrite-strings -Wpointer-arith \
-         -Wstrict-prototypes -Wmissing-prototypes \
-         -Wno-uninitialized -Wunreachable-code \
+         -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+         -Wall -Wextra -Wcast-align -Wwrite-strings -Wpointer-arith \
+         -Wstrict-prototypes -Wmissing-prototypes -Wunreachable-code \
          -Wformat -Werror=format-security \
-         -D_THREAD_SAFE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 -fcommon
+         -Wshadow -Wundef \
+         -D_THREAD_SAFE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 \
+         -fno-common
 
 # 严格模式（可选）：make STRICT=1
 ifeq ($(STRICT),1)
 CFLAGS += -Wconversion -ftrapv
 endif
 
-# 链接参数：基础系统库
-# 注意：不含 crypto / ffmpeg，需要的模块自行 LIBS += $(LIB_CRYPTO)
-LDFLAGS = -L$(LIB) -L$(SOFT_LIB) -L$(EXT_LIB) \
-          -fPIE -pie -fstack-protector \
-          -lpthread -lm -lxml2 -luuid
+# —— 库构建专用参数 ——
+# 库目标文件必须 -fPIC（位置无关，方可链入 .a/.so 及 PIE 可执行程序）
+LIB_CFLAGS  = -fPIC
+# 库链接参数（动态库用 -shared；静态库无额外链接参数）
+LIB_LDFLAGS =
+SOFLAGS     = -shared
 
-# 动态库编译参数（-o 由规则给出，不再塞进 SOFLAGS）
-SOFLAGS = -shared
+# —— 可执行程序构建专用参数 ——
+# 可执行目标文件用 -fPIE（与链接期 -pie 配合，生成位置无关可执行程序）
+BIN_CFLAGS  = -fPIE
+# 可执行程序链接参数：PIE + 装载期加固 + 基础系统库
+# 注意：不含 crypto / ffmpeg，需要的模块自行 LIBS += $(LIB_CRYPTO)
+LDFLAGS     = -L$(LIB) -L$(SOFT_LIB) -L$(EXT_LIB) \
+              -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
+              -lpthread -lm -lxml2 -luuid
 
 # 静态库参数
 ARFLAGS = -rcs
@@ -99,20 +108,35 @@ LIBS ?=
 # ==============================================
 #  通用编译规则
 # ==============================================
+# 模块产物类型：lib（默认，产出 .a/.so）或 bin（产出可执行程序）；
+# 各模块 Makefile 可显式覆盖，例如 BUILD = bin
+BUILD ?= lib
+
+# 依据 BUILD 选择目标文件编译参数（库用 -fPIC，可执行程序用 -fPIE）
+ifeq ($(BUILD),bin)
+OBJ_CFLAGS = $(BIN_CFLAGS)
+else
+OBJ_CFLAGS = $(LIB_CFLAGS)
+endif
+
 .SUFFIXES: .c .o
 
 .c.o:
-	$(CC) -c $(CFLAGS) -o $@ $<
+	$(CC) -c $(CFLAGS) $(OBJ_CFLAGS) -o $@ $<
 
 # ==============================================
 #  通用业务指令（全局统一规范）
 # ==============================================
 .PHONY: all clean lib_static lib_so install_bin install_lib check_layer format format-check
 
+ifeq ($(BUILD),bin)
+all: $(TARGET) install_bin
+else
 all: lib_static lib_so install_lib
+endif
 
 clean:
-	rm -rf *.o *.a *.so *.dylib *.exe core *.log api/*.o ut/bin
+	rm -rf *.o *.a *.so *.dylib *.exe core *.log $(TARGET) api/*.o ut/bin
 
 # 编译静态库
 lib_static: $(OBJS)
@@ -120,9 +144,16 @@ lib_static: $(OBJS)
 	-$(RANLIB) $(TARGET)
 
 # 编译动态库（产出 TARGET_SO，库名不含下划线）
-# 复用 CFLAGS 提供 -fPIC / 栈保护等，避免 LDFLAGS 中的 -pie（专用于可执行程序）
+# 用 LIB_CFLAGS(-fPIC) + SOFLAGS(-shared)；绝不引入 LDFLAGS 中的 -pie（专用于可执行程序）
 lib_so: $(OBJS)
-	$(CC) $(CFLAGS) $(SOFLAGS) -o $(TARGET_SO) $(OBJS) $(LIBS) -lpthread
+	$(CC) $(CFLAGS) $(LIB_CFLAGS) $(SOFLAGS) $(LIB_LDFLAGS) -o $(TARGET_SO) $(OBJS) $(LIBS)
+
+# 可执行程序统一链接配方（仅 BUILD=bin 时启用；模块需将 TARGET 设为可执行文件名，
+# 且 OBJS 为其源文件；链接用 BIN_CFLAGS + LDFLAGS(-pie 等)）
+ifeq ($(BUILD),bin)
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) $(BIN_CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+endif
 
 # 安装可执行程序 --> bin/
 install_bin:
