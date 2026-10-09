@@ -13,17 +13,31 @@
 
 static int g_fail = 0;
 
-#define CHECK(cond, msg) do { \
-    if (!(cond)) { printf("  [FAIL] %s\n", msg); g_fail++; } \
-    else { printf("  [ OK ] %s\n", msg); } \
-} while (0)
+#define CHECK(cond, msg)                                                                                               \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (!(cond))                                                                                                   \
+        {                                                                                                              \
+            printf("  [FAIL] %s\n", msg);                                                                              \
+            g_fail++;                                                                                                  \
+        }                                                                                                              \
+        else                                                                                                           \
+        {                                                                                                              \
+            printf("  [ OK ] %s\n", msg);                                                                              \
+        }                                                                                                              \
+    } while (0)
 
 static void dump_file(const char *path)
 {
     char line[4096];
     FILE *f = fopen(path, "r");
-    if (!f) { printf("  (无法打开 %s)\n", path); return; }
-    while (fgets(line, sizeof(line), f)) fputs(line, stdout);
+    if (!f)
+    {
+        printf("  (无法打开 %s)\n", path);
+        return;
+    }
+    while (fgets(line, sizeof(line), f))
+        fputs(line, stdout);
     fclose(f);
 }
 
@@ -56,11 +70,15 @@ int main(void)
 
     /* 5. 文件内容校验：不应出现明文口令，应出现审计行 */
     {
-        char buf[4096]; int found_audit = 0, leak_pwd = 0;
+        char buf[4096];
+        int found_audit = 0, leak_pwd = 0;
         FILE *f = fopen(QLOG_UT_FILE, "r");
-        while (fgets(buf, sizeof(buf), f)) {
-            if (strstr(buf, "AUDIT")) found_audit++;
-            if (strstr(buf, "s3cr3t")) leak_pwd++;
+        while (fgets(buf, sizeof(buf), f))
+        {
+            if (strstr(buf, "AUDIT"))
+                found_audit++;
+            if (strstr(buf, "s3cr3t"))
+                leak_pwd++;
         }
         fclose(f);
         CHECK(found_audit >= 1, "审计记录已写入");
@@ -69,7 +87,8 @@ int main(void)
 
     /* 6. 轮转：设置极小上限触发自动轮转，并手动轮转 */
     q_log_t *log2 = q_log_open(QLOG_UT_FILE2, Q_LOG_INFO, 50);
-    for (int i = 0; i < 5; i++) QLOG_INFO(log2, "rotate-trigger-line-%d padding-padding", i);
+    for (int i = 0; i < 5; i++)
+        QLOG_INFO(log2, "rotate-trigger-line-%d padding-padding", i);
     int rc = q_log_rotate(log2);
     CHECK(rc == 0, "q_log_rotate 手动轮转成功");
     QLOG_INFO(log2, "after-manual-rotate");

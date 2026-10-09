@@ -217,6 +217,7 @@ include ../../../include/Makefile.inc     # 或 include ${SOFT_HOME}/include/Mak
 - **链接顺序铁律**：本模块 → l\_3 → l\_2 → l\_1（**高级在前、低级在后**）；顺序错误即视为分层违规
 - 公共配置 `include/Makefile.inc` 已统一提供 `CC / AR / CFLAGS / LDFLAGS / TARGET / LIBS / $(LIB_CRYPTO)` 及 `lib_static / lib_so / install_lib / install_bin / clean / check_layer` 目标；**子 Makefile 只能用 `+=` 追加，禁止重定义 `CC` 或覆盖安全编译参数**
 - 提供 `shell/check_layer.sh` 静态扫描：解析所有 `#include` 与本模块 Makefile 的 `-lq*` 列表，上报「l\_N 引用了 l\_M（M > N）」、同层互引、库名含下划线、以及 Makefile 中缺失的下层依赖，作为 CI 必过项
+- **代码格式化统一用 clangd / clang-format**：工程根目录已提供 `.clang-format`（样式：4 空格缩进、Allman 花括号、指针靠右、保留 `#include` 顺序）与 `.clangd`（声明 `-Iinclude` 等自定义头路径，使 clangd 无需 `compile_commands.json` 即可解析）；编辑器由 clangd 按 `.clang-format` 自动格式化，命令行用 `make format`（本模块就地重写）/ `make format-check`（CI 检查，不匹配则非零退出）
 
 ## 四、AI 编译 \& 构建约束
 

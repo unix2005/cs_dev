@@ -7,7 +7,8 @@
 
 int q_log_rotate(q_log_t *log)
 {
-    if (!log) return -1;
+    if (!log)
+        return -1;
     (void)pthread_mutex_lock(&log->lock);
     int rc = q_log_rotate_unlocked(log);
     (void)pthread_mutex_unlock(&log->lock);

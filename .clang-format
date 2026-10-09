@@ -1,0 +1,19 @@
+---
+# clang-format / clangd 共享的代码格式化样式
+# 贴合本工程既有风格：4 空格缩进、Allman 花括号、指针靠右、保留 #include 顺序
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+BreakBeforeBraces: Allman
+PointerAlignment: Right
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+SortIncludes: false
+IndentCaseLabels: false
+SpaceAfterCStyleCast: false
+ReflowComments: false

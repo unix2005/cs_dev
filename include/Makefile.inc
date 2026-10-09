@@ -107,7 +107,7 @@ LIBS ?=
 # ==============================================
 #  通用业务指令（全局统一规范）
 # ==============================================
-.PHONY: all clean lib_static lib_so install_bin install_lib check_layer
+.PHONY: all clean lib_static lib_so install_bin install_lib check_layer format format-check
 
 all: lib_static lib_so install_lib
 
@@ -137,6 +137,18 @@ install_lib:
 # 分层依赖静态检查
 check_layer:
 	@sh $(SOFT_HOME)/shell/check_layer.sh
+
+# ==============================================
+#  代码格式化（clangd / clang-format 共用根目录 .clang-format 样式）
+#  - make format       按样式就地重写当前模块的 *.c / *.h
+#  - make format-check 仅检查（不匹配则非零退出，便于 CI）
+#  注：clangd 在编辑器中按 .clang-format 自动格式化；本目标提供命令行等价能力
+# ==============================================
+format:
+	@find . \( -name '*.c' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
+
+format-check:
+	@find . \( -name '*.c' -o -name '*.h' \) -print0 | xargs -0 clang-format --dry-run --Werror
 
 # ==============================================
 #  跨平台兼容

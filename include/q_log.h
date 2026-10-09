@@ -21,7 +21,7 @@
 /* 本文件自包含：直接引入所需公共基础头，便于外部模块独立编译。
    headers.h 仅作 api/ 源文件的聚合入口（不安装到 include/l_N/）。
    注：<stdarg.h> / <stdint.h> 等已由 include_stdio.h 统一提供，无需单独引入。 */
-#define _POSIX_C_SOURCE 200809L   /* 启用 fdopen/open/localtime_r 等 POSIX 声明 */
+#define _POSIX_C_SOURCE 200809L /* 启用 fdopen/open/localtime_r 等 POSIX 声明 */
 #include "include_stdio.h"
 #include "include_time.h"
 #include "include_thd.h"

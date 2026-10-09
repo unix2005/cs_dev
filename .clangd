@@ -1,0 +1,18 @@
+---
+# clangd 工程配置
+# 项目为纯 Makefile 构建、无 compile_commands.json，此处直接声明编译参数，
+# 使 clangd 能正确解析自定义头文件（include/、open_src/tongsuo/include）与平台宏，
+# 从而获得准确的补全 / 诊断 / 格式化（格式化样式另见 .clang-format）。
+CompileFlags:
+  Add:
+    - -Iinclude
+    - -I.
+    - -Iopen_src/tongsuo/include
+    - -DQ_SYS_LINUX
+    - -D_FILE_OFFSET_BITS=64
+    - -D_THREAD_SAFE
+    - -D_LARGEFILE64_SOURCE
+  # 去除会让 clangd 误报的告警转错误选项（clangd 仅做语法/语义解析，不产出可执行）
+  Remove:
+    - -Werror=format-security
+    - -Werror*

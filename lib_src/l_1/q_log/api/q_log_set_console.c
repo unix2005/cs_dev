@@ -7,7 +7,8 @@
 
 void q_log_set_console(q_log_t *log, int enable)
 {
-    if (!log) return;
+    if (!log)
+        return;
     (void)pthread_mutex_lock(&log->lock);
     log->console = enable ? 1 : 0;
     (void)pthread_mutex_unlock(&log->lock);
