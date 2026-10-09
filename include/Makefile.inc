@@ -45,11 +45,6 @@ BIN     = $(SOFT_HOME)/bin
 SOFT_INCL = .
 SOFT_LIB  = .
 
-# 分层头文件目录（保留层级，便于编译期检查分层依赖）
-INCLUDE_L1 = $(INCLUDE)/l_1
-INCLUDE_L2 = $(INCLUDE)/l_2
-INCLUDE_L3 = $(INCLUDE)/l_3
-
 # ================= 第三方依赖（按需启用）=================
 # 国密密码库 Tongsuo（铜锁）：只有 lib_src/l_1/q_crypto 需要链接
 TONGSUO_HOME ?= $(SOFT_HOME)/open_src/tongsuo
@@ -65,7 +60,7 @@ EXT_LIB  = $(TONGSUO_HOME)/lib
 # ==============================================
 #  核心编译参数
 # ==============================================
-CFLAGS = -I$(INCLUDE) -I$(INCLUDE_L1) -I$(INCLUDE_L2) -I$(INCLUDE_L3) \
+CFLAGS = -I$(INCLUDE) -I$(INCLUDE) \
          -I$(SOFT_INCL) -I$(EXT_INCL) -I. \
          -g -O2 -m64 -std=c99 \
          -fPIE -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
@@ -127,12 +122,10 @@ lib_so: $(OBJS)
 
 # 安装可执行程序 --> bin/
 install_bin:
-	mkdir -p $(BIN)
 	mv -f $(TARGET) $(BIN)/
 
 # 安装库 --> lib/（Linux/macOS）；Windows 产物由 dll/ 规则处理
 install_lib:
-	mkdir -p $(LIB)
 	mv -f $(TARGET) $(LIB)/
 
 # 分层依赖静态检查

@@ -44,7 +44,7 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
 
 3. **编译产物分离**：所有源码编译结果必须输出至对应平台产物目录：Linux/macOS产物至lib/、Windows库产物至dll/、可执行程序统一至bin/
 
-4. **头文件统一归集**：所有lib\_src、soft\_src编译所需公共头文件，编译完成后必须统一拷贝至 include/，保证全局编译引用统一；**lib\_src 各 `q_xxx` 模块头文件必须保留层级子目录**（`include/l_1/`、`include/l_2/`、`include/l_3/`），不得拍平，以便编译期检查分层依赖；**公共基础头文件（`include_*.h`）平铺于 include/ 根目录**，由所有库按需引用
+4. **头文件统一归集**：所有lib\_src、soft\_src编译所需公共头文件，编译完成后必须统一拷贝至 include/，保证全局编译引用统一；**lib\_src 各 `q_xxx` ；**公共基础头文件（`include_*.h`）平铺于 include/ 根目录**，由所有库按需引用
 
 5. **源码与产物隔离**：src类目录（lib\_src/soft\_src/open\_src）仅保留源码，不存放编译产物、临时文件、日志文件、缓存文件
 
@@ -60,8 +60,31 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
     - **编译产物（库文件名）以 `libq` 开头，且【不含下划线】**：`libqlog.a` / `libqlog.so`（Windows：`qlog.lib` / `qlog.dll`）
     - **换算规则**：`l_1/q_log` → `libqlog`；`l_2/q_net` → `libqnet`；`l_3/q_chan` → `libqchan`（即「`libq` + 去掉下划线与 `q_` 前缀后的模块名」）
     - **链接参数同步去下划线**：`-lqlog`、`-lqnet`、`-lqchan`，**严禁写成 `-lq_log`**
-    - 模块对外头文件：`q_xxx.h`；源码建议 `q_xxx_*.c`
+    - 模块对外头文件：`q_xxx.h`（置于模块根目录）；C 源码统一放 `api/` 目录（`q_xxx_*.c`，每个函数一个源文件）；详见下方「库目录内部结构强制规范」
     - **禁止**把多个模块合并成一个库、**禁止**一层只产出一个库
+
+    **【库目录内部结构强制规范】**
+
+    每个 `q_xxx` 模块目录必须包含以下固定结构，**禁止零散摆放源文件 / 测试 / 头文件**：
+
+    | 条目 | 名称 | 用途 / 强制要求 |
+    |---|---|---|
+    | 聚合头 | `headers.h` | 本库**统一聚合头文件**，集中 `#include` 本库所需的全部 `include_*.h` 公共基础头（`include_stdio.h` / `include_time.h` / `include_thd.h` / `include_net.h` / `include_xml.h` 等）；**禁止在 `api/` 下的 .c 中直接写 `#include "include_*.h"`**，一律经 `headers.h` 引入 |
+    | 构建 | `Makefile` | 模块构建文件，首行引入 `include/Makefile.inc` |
+    | 对外头 | `q_xxx.h`（及本库其它 `.h`） | 对外 / 内部头文件，编译后归集至 `include/` |
+    | 源码 | `api/` | **C 源代码目录**，放所有 `q_xxx_*.c` 实现（每个函数一个源文件） |
+    | 测试 | `ut/` | **单元测试 / 小程序目录**，放本库各函数的测试小程序（如 `q_xxx_xxx_ut.c`），用于独立编译验证 |
+
+    **源文件引用铁律**：`api/` 下的每个 `.c` 头部只需两行：
+
+    ```c
+    #include "headers.h"   /* 本库聚合的公共基础头（已在其中包含所需 include_*.h） */
+    #include "q_xxx.h"     /* 本库对外头，及必要的本库内部 .h */
+    ```
+
+    - **禁止**在 `.c` 中直接引用 `include_*.h`，也**禁止**把公共头内容复制 / 内联进模块内
+    - 本库内部共享结构体、常量、静态内联辅助函数统一放在 `q_xxx.h` 或本库自有内部头中，由 `headers.h` 之后引入
+    - `headers.h` 与 `q_xxx.h` 位于模块根目录，`api/`、`ut/` 下的 `.c` 经编译 `-I`（模块根）解析 `#include "headers.h"` / `#include "q_xxx.h"`，无需写相对路径
 
     **l\_1 基础层（零项目内依赖，仅依赖 libc / OS syscall / 开源库）**
 
@@ -162,13 +185,14 @@ graph TD
 5. **第三方库收敛**：**Tongsuo 只允许 `l_1/q_crypto`（产物 `libqcrypto`）直接调用**，上层一律经由 `libqcrypto` 封装接口使用；只有 `q_crypto` 的 Makefile 允许 `LIBS += $(LIB_CRYPTO)`；FFmpeg 例外，允许 `soft_src/client` 与视频模块直接调用
 6. **新增模块必须先定层**：新增任何 lib\_src 模块时，AI 必须先声明其**归属层级、`q_` 库名、依赖的 `q_*` 库清单**，三项齐全方可创建
 7. **新库必须同步登记三处**：模块目录 `lib_src/l_N/q_xxx/`、`Makefile`（含逐级 `-lq_*` 依赖）、`shell/` 总构建脚本的编译顺序；缺任一处不得提交
+8. **创建源代码规则**: 每个函数一个源文件，每个源文件一个 `q_xxx` 函数，每个函数控制在500行以内，最多不超过1500行
 
 **头文件（公共头文件优先复用，禁止重复造轮子）**
 
 - `include/` 下已提供的**公共头文件**（`include_stdio.h`、`include_net.h`、`include_thd.h`、`include_time.h`、`include_xml.h`）**所有库按需直接引用**，不得另写同类头文件、不得复制其内容到模块内
 - 新增公共头文件沿用 `include_<模块>.h` 命名，平铺在 `include/` 根目录
-- 各 `q_xxx` 模块的**对外头文件**编译后拷贝至 `include/l_N/`（`include/l_1/`、`include/l_2/`、`include/l_3/`）保留层级，引用形式 `#include <l_2/q_net.h>`
-- 每个库源文件**必须先引入所需公共头文件，再引入本层/下层模块头文件**
+- 各 `q_xxx` 模块的**对外头文件**编译后拷贝至 `include/l_N/`（`include/l_1/`、`include/l_2/`、`include/l_3/`）保留层级，引用形式 `#include <l_2/q_net.h>`（注：与 §3.1 目录结构一致，禁止拍平）
+- 每个库源文件**统一通过本库 `headers.h` 引入所需 `include_*.h` 公共头（禁止直接写 `#include "include_*.h"`），随后引入本库 `q_xxx.h`**（及必要的本库内部 `.h`）；公共头优先复用，禁止重复造轮子。目录结构详见 §3.1「库目录内部结构强制规范」
 
 **产物与 Makefile（每库独立产物，逐级添加依赖）**
 
