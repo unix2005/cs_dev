@@ -191,7 +191,7 @@ graph TD
 
 - `include/` 下已提供的**公共头文件**（`include_stdio.h`、`include_net.h`、`include_thd.h`、`include_time.h`、`include_xml.h`）**所有库按需直接引用**，不得另写同类头文件、不得复制其内容到模块内
 - 新增公共头文件沿用 `include_<模块>.h` 命名，平铺在 `include/` 根目录
-- 各 `q_xxx` 模块的**对外头文件**编译后拷贝至 `include/l_N/`（`include/l_1/`、`include/l_2/`、`include/l_3/`）保留层级，引用形式 `#include <l_2/q_net.h>`（注：与 §3.1 目录结构一致，禁止拍平）
+- 各 `q_xxx` 模块的**对外头文件**编译后直接拷贝至 `include/`（平铺，不建 `include/l_N/` 子目录），引用形式 `#include <q_xxx.h>`（如 `#include <q_log.h>`）；模块内部聚合头 `headers.h` 仅作 `api/` 源文件聚合入口，**不安装到 `include/`**（注：与 §3.1 目录结构一致）
 - 每个库源文件**统一通过本库 `headers.h` 引入所需 `include_*.h` 公共头（禁止直接写 `#include "include_*.h"`），随后引入本库 `q_xxx.h`**（及必要的本库内部 `.h`）；公共头优先复用，禁止重复造轮子。目录结构详见 §3.1「库目录内部结构强制规范」
 
 **产物与 Makefile（每库独立产物，逐级添加依赖）**
@@ -201,15 +201,17 @@ graph TD
 
 ```makefile
 # 例：lib_src/l_3/q_chan/Makefile
-include ../../../include/Makefile.inc     # 或 include ${SOFT_HOME}/include/Makefile.inc
-
-TARGET   = libqchan.a                     # libq + 模块名，无下划线
-OBJS     = q_chan.o q_chan_io.o
+# 模块变量必须在 include 之前定义，供 Makefile.inc 的 lib_static/lib_so 正确捕获先决条件
+TARGET    = libqchan.a                    # libq + 模块名，无下划线
+TARGET_SO = libqchan.so                   # 动态库名（可省略，默认由 TARGET 推导）
+OBJS      = q_chan.o q_chan_io.o
 
 # 逐级添加依赖：先 l_2，再 l_1（高级在前、低级在后）
 LIBS    += -lqcodec -lqsec -lqnet         # l_2
 LIBS    += -lqcrypto -lqrand -lqmem       # l_1
 LIBS    += -lqlog                         # l_1
+
+include ../../../include/Makefile.inc     # 或 include ${SOFT_HOME}/include/Makefile.inc
 ```
 
 - **链接顺序铁律**：本模块 → l\_3 → l\_2 → l\_1（**高级在前、低级在后**）；顺序错误即视为分层违规

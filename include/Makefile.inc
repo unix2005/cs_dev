@@ -13,10 +13,11 @@
 #         soft_src/<proc>/    ->  include ../../include/Makefile.inc
 #    3) 命令行传入：make SOFT_HOME=/Users/mac/work/cs_dev
 #
-#  【各模块 Makefile 必须定义】
-#         TARGET  = libqxxx.a        # 库产物名：libq + 模块名，不含下划线
-#         OBJS    = q_xxx.o ...
-#         LIBS   += -lqxxx ...       # 逐级添加下层依赖：l_3 -> l_2 -> l_1
+#  【各模块 Makefile 必须定义（须在 include 之前定义，供 lib_static/lib_so 正确捕获先决条件）】
+#         TARGET    = libqxxx.a        # 库产物名：libq + 模块名，不含下划线
+#         TARGET_SO = libqxxx.so       # 动态库名（可省略，默认由 TARGET 推导：libqxxx.so）
+#         OBJS      = q_xxx.o ...      # 必须先于 include 定义
+#         LIBS     += -lqxxx ...       # 逐级添加下层依赖：l_3 -> l_2 -> l_1
 # ==============================================
 
 # 基础编译工具链
@@ -89,6 +90,8 @@ ARFLAGS = -rcs
 
 # 目标名（各模块 Makefile 覆盖，如 TARGET = libqlog.a）
 TARGET ?= libapp.a
+# 动态库名（默认由静态库名推导，模块可显式覆盖，如 TARGET_SO = libqlog.so）
+TARGET_SO ?= $(TARGET:.a=.so)
 
 # 分层依赖（各模块 Makefile 逐级追加，如 LIBS += -lqcodec -lqcrypto）
 LIBS ?=
@@ -106,27 +109,30 @@ LIBS ?=
 # ==============================================
 .PHONY: all clean lib_static lib_so install_bin install_lib check_layer
 
-all: lib_static install_lib
+all: lib_static lib_so install_lib
 
 clean:
-	rm -rf *.o *.a *.so *.dylib *.exe core *.log
+	rm -rf *.o *.a *.so *.dylib *.exe core *.log api/*.o ut/bin
 
 # 编译静态库
 lib_static: $(OBJS)
 	$(AR) $(ARFLAGS) $(TARGET) $(OBJS)
 	-$(RANLIB) $(TARGET)
 
-# 编译动态库（TARGET 需为 libqxxx.so）
+# 编译动态库（产出 TARGET_SO，库名不含下划线）
+# 复用 CFLAGS 提供 -fPIC / 栈保护等，避免 LDFLAGS 中的 -pie（专用于可执行程序）
 lib_so: $(OBJS)
-	$(CC) $(SOFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS) $(LIBS)
+	$(CC) $(CFLAGS) $(SOFLAGS) -o $(TARGET_SO) $(OBJS) $(LIBS) -lpthread
 
 # 安装可执行程序 --> bin/
 install_bin:
 	mv -f $(TARGET) $(BIN)/
 
 # 安装库 --> lib/（Linux/macOS）；Windows 产物由 dll/ 规则处理
+# 注：仅搬运库文件；对外头文件由各模块自行 install_hdr 归集，不在此处拷贝内部聚合头
 install_lib:
 	mv -f $(TARGET) $(LIB)/
+	mv -f $(TARGET_SO) $(LIB)/
 
 # 分层依赖静态检查
 check_layer:

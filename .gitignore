@@ -43,3 +43,6 @@ minimal_svc
 minimal_svc_shared
 *.dSYM/
 !qboot/templates/**/Makefile
+
+# 开源软件
+open_src/
