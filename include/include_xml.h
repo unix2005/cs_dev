@@ -23,6 +23,11 @@
 // 预留第三方XML库引入入口
 // 示例：#include <tinyxml2.h>
 // 所有业务代码仅 #include "include_xml.h" 即可适配全平台
+#include <libxml2/libxml/parser.h>
+#include <libxml2/libxml/tree.h>
+#include <libxml2/libxml/xpath.h>
+#include <libxml2/libxml/xmlstring.h>
+#include <cjson/cJSON.h>
 
 #endif // INCLUDE_XML_H
 
