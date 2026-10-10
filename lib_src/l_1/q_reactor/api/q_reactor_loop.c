@@ -8,12 +8,7 @@
 
 int q_reactor_loop(q_reactor_t *r, volatile int *stop, int timeout_ms)
 {
-    if (!r || !stop)
+    if (!r)
         return -1;
-    while (!*stop)
-    {
-        if (q_reactor_run(r, timeout_ms) != 0)
-            return -1;
-    }
-    return 0;
+    return q_disp_loop(r->disp, stop, timeout_ms);
 }
