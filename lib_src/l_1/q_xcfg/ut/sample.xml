@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <gateway>
+        <port>8443</port>
+        <enabled>true</enabled>
+        <ratio>0.75</ratio>
+        <host>localhost</host>
+    </gateway>
+</config>

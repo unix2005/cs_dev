@@ -167,7 +167,7 @@ install_lib:
 
 # 分层依赖静态检查
 check_layer:
-	@sh $(SOFT_HOME)/shell/check_layer.sh
+	@bash $(SOFT_HOME)/shell/check_layer.sh
 
 # ==============================================
 #  代码格式化（clangd / clang-format 共用根目录 .clang-format 样式）
