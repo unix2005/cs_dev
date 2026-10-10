@@ -110,8 +110,7 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
 
     | 模块 | 产出库 | 职责 |
     |---|---|---|
-    | `l_3/q_chan/` | `libqchan` | 安全通道（SM2 协商时序 + SM4\-GCM 收发 + AAD 组装 + 通道绑定），链接 `-lqcodec -lqsec -lqnet -lqcrypto` |
-    | `l_3/q_proto/` | `libqproto` | 连接状态机、指令分发、会话 / Token 管理 |
+    | `l_3/q_chan/` | `libqchan` | **已合并原 `l_3/q_proto`**（§3.3.3 例外登记：同层禁止互调，故并入单一 l\_3 模块）：安全通道（SM2 协商时序 + SM4\-GCM 收发 + AAD 组装 + 通道绑定）+ 协议语义（连接状态机、指令分发、会话 / Token 绑定）；链接 `-lqcodec -lqsec -lqnet -lqcrypto -lqrand -lqmem -lqlog` |
     | `l_3/q_spa/` | `libqspa` | SPA 单包授权（报文构造 / 解析 / 校验） |
 
 2. **soft\_src 开发规范**：仅开发上层业务逻辑，包含服务端业务处理、**客户端 GTK4 UI 逻辑**、Token会话管理、视频流调度、权限校验等核心业务，调用lib\_src编译后的库能力，禁止重复编写底层工具逻辑
@@ -153,7 +152,7 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
 ```mermaid
 graph TD
     APP["soft_src 业务层<br/>knockd / netd / bizd / client"]
-    L3["l_3 协议层<br/>q_chan / q_proto / q_spa"]
+    L3["l_3 协议层<br/>q_chan / q_spa"]
     L2["l_2 能力层<br/>q_net / q_ipc / q_codec / q_sec"]
     L1["l_1 基础层<br/>q_log / q_mem / q_ds / q_util / q_rand / q_crypto"]
 

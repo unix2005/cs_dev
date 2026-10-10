@@ -1,0 +1,66 @@
+/* ===== 全局 ===== */
+window {
+  background-color: #f5f6f8;
+  font-family: "Noto Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+/* ===== 导航 / 菜单栏 ===== */
+.nav-bar {
+  background: #2b3a55;
+  color: #ffffff;
+  border-bottom: 1px solid #1f2c41;
+}
+#nav-title {
+  font-size: 15px;
+  font-weight: bold;
+  color: #ffffff;
+}
+menubutton {
+  color: #ffffff;
+  background: #34466a;
+}
+menubutton:hover {
+  background: #3d5179;
+}
+
+/* ===== 左侧组织机构树 / 右侧数据表 ===== */
+#org-tree, #data-table {
+  background: #ffffff;
+}
+treeview header button {
+  background: #eef1f5;
+  font-weight: bold;
+}
+treeview:selected {
+  background: #2b6cb0;
+  color: #ffffff;
+}
+
+/* ===== 地图占位 ===== */
+#map-area {
+  background: #dfe6ee;
+}
+
+/* ===== 状态栏 ===== */
+.status-bar {
+  background: #2b3a55;
+  color: #c8d2e0;
+  border-top: 1px solid #1f2c41;
+}
+
+/* ===== 登录页 ===== */
+#login-title {
+  color: #2b3a55;
+}
+#login-msg {
+  color: #c0392b;
+  font-size: 12px;
+}
+button.suggested-action {
+  background: #2b6cb0;
+  color: #ffffff;
+  font-weight: bold;
+}
+button.suggested-action:hover {
+  background: #357ab8;
+}

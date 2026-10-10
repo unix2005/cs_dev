@@ -13,8 +13,17 @@
 #include <pthread.h>
 
 static int g_fail = 0;
-#define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); g_fail++; } \
-                      else printf("PASS: %s\n", m); } while (0)
+#define CHECK(c, m)                                                                                                    \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (!(c))                                                                                                      \
+        {                                                                                                              \
+            printf("FAIL: %s\n", m);                                                                                   \
+            g_fail++;                                                                                                  \
+        }                                                                                                              \
+        else                                                                                                           \
+            printf("PASS: %s\n", m);                                                                                   \
+    } while (0)
 
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -53,7 +62,8 @@ static int g_hits = 0;
 static void timer_h(int fd, uint32_t events, void *ctx)
 {
     uint64_t v = 0;
-    (void)events; (void)ctx;
+    (void)events;
+    (void)ctx;
     if (read(fd, &v, sizeof(v)) == (ssize_t)sizeof(v))
         g_hits += (int)v;
 }
@@ -81,7 +91,8 @@ static void work_fn(void *arg)
 static void timer_dispatch_h(int fd, uint32_t events, void *ctx)
 {
     uint64_t v = 0;
-    (void)events; (void)ctx;
+    (void)events;
+    (void)ctx;
     if (read(fd, &v, sizeof(v)) == (ssize_t)sizeof(v) && g_wp)
         q_tpool_dispatch(g_wp, work_fn, NULL);
 }
@@ -95,7 +106,7 @@ int main(void)
     CHECK(d != NULL, "q_disp create(4)");
     for (int i = 0; i < 100; i++)
         CHECK(q_disp_submit(d, disp_inc, NULL) == 0, "q_disp submit");
-    q_disp_destroy(d);   /* join worker，确保所有任务完成后再断言 */
+    q_disp_destroy(d); /* join worker，确保所有任务完成后再断言 */
     CHECK(g_disp_cnt == 100, "q_disp 100 任务全部执行");
 
     /* B) 跨线程 submit */
@@ -110,14 +121,13 @@ int main(void)
 
     /* C) 本地任务：非 fd 回调在循环线程内联执行 */
     g_local_ran = 0;
-    q_disp_t *d3 = q_disp_create(0);   /* 仅事件循环，无 worker */
+    q_disp_t *d3 = q_disp_create(0); /* 仅事件循环，无 worker */
     CHECK(d3 != NULL, "q_disp create(0)");
     CHECK(q_disp_submit(d3, local_fn, NULL) == -1, "无 worker 时 submit 返回 -1");
     q_disp_submit_local(d3, local_fn, NULL);
-    q_disp_run(d3, 500);   /* 被 wake 唤醒后内联执行 local_fn */
+    q_disp_run(d3, 500); /* 被 wake 唤醒后内联执行 local_fn */
     CHECK(g_local_ran == 1, "q_disp 本地任务（非 fd 回调）被执行");
-    CHECK(pthread_equal(g_local_tid, pthread_self()) != 0,
-          "本地任务在事件循环(本)线程内联执行");
+    CHECK(pthread_equal(g_local_tid, pthread_self()) != 0, "本地任务在事件循环(本)线程内联执行");
     q_disp_destroy(d3);
 
 #ifdef __linux__
@@ -168,11 +178,13 @@ int main(void)
     q_reactor_del(r2, tfd2);
     close(tfd2);
     q_reactor_destroy(r2);
-    q_tpool_destroy(wp);   /* join worker：确保所有派发任务执行完毕后再断言 */
+    q_tpool_destroy(wp); /* join worker：确保所有派发任务执行完毕后再断言 */
     CHECK(g_work >= 1, "reactor->worker 派发 >=1");
 #endif /* __linux__ */
 
-    if (g_fail == 0) printf("\nALL PASS\n");
-    else printf("\n%d FAILED\n", g_fail);
+    if (g_fail == 0)
+        printf("\nALL PASS\n");
+    else
+        printf("\n%d FAILED\n", g_fail);
     return g_fail ? 1 : 0;
 }

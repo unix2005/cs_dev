@@ -18,6 +18,8 @@
 #         TARGET_SO = libqxxx.so       # 动态库名（可省略，默认由 TARGET 推导：libqxxx.so）
 #         OBJS      = q_xxx.o ...      # 必须先于 include 定义
 #         LIBS     += -lqxxx ...       # 逐级添加下层依赖：l_3 -> l_2 -> l_1
+#  注意：LIBS 仅用于【可执行程序】的最终链接；编译动态库(.so)时【不】传入 -l，
+#        内部库依赖以未决符号保留，运行期经 RUNPATH 从 lib/ 解析。
 # ==============================================
 
 # 基础编译工具链
@@ -43,8 +45,9 @@ LIB     = $(SOFT_HOME)/lib
 BIN     = $(SOFT_HOME)/bin
 
 # 本地源码目录（当前编译目录）
-SOFT_INCL = .
-SOFT_LIB  = .
+# 用 ?= 以便模块在 include 前扩展（如守护进程追加 ../../common 引入公共件头）
+SOFT_INCL ?= .
+SOFT_LIB  ?= .
 
 # ================= 第三方依赖（按需启用）=================
 # 国密密码库 Tongsuo（铜锁）：只有 lib_src/l_1/q_crypto 需要链接
@@ -64,7 +67,7 @@ EXT_LIB  = $(TONGSUO_HOME)/lib
 # 公共编译参数（库与可执行程序共用）：包含路径、优化、告警、栈保护、宏定义
 # 注意：此处不含 -fPIE / -fPIC / -pie，这些按“库 / 可执行程序”分类放到下方专用变量
 CFLAGS = -I. -I$(INCLUDE) \
-         -I$(SOFT_INCL) -I$(EXT_INCL) \
+         $(addprefix -I,$(SOFT_INCL)) -I$(EXT_INCL) \
          -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
          -Wall -Wextra -Wcast-align -Wwrite-strings -Wpointer-arith \
          -Wstrict-prototypes -Wmissing-prototypes -Wunreachable-code \
@@ -81,31 +84,41 @@ endif
 # —— 库构建专用参数 ——
 # 库目标文件必须 -fPIC（位置无关，方可链入 .a/.so 及 PIE 可执行程序）
 LIB_CFLAGS  = -fPIC
-# 库链接参数（动态库用 -shared；静态库无额外链接参数）
-# 动态库需能定位本工程其它 q_* 依赖库：补 -L$(LIB) 供链接期检索，
-# 并写入 -Wl,-rpath,$(LIB) 作为 RUNPATH，使本 .so 的“传递依赖”
-# （如 libqnet.so 依赖 libqreactor.so）在运行时也能从 lib/ 解析。
-LIB_LDFLAGS = -L$(LIB) -Wl,-rpath,$(LIB)
+# 动态库链接参数（仅 -shared，不含 LDFLAGS 的 -pie）：
+#  -L$(LIB) -Wl,-rpath,$(LIB) 写入 RUNPATH，使本 .so 运行期能从 lib/ 解析
+#    其传递依赖的其它 q_* 库（如 libqchan.so 调用 libqcodec.so）；
+#  -Wl,--allow-shlib-undefined 允许本 .so 保留未决符号，依赖由最终链接
+#    可执行程序（或运行期）统一解析——动态库编译期不 -l 工程内部库。
+#  注意：绝不引入 LIBS（-l 工程库）。
+LIB_LDFLAGS = -L$(LIB) -Wl,-rpath,$(LIB) -Wl,--allow-shlib-undefined
+# 动态库类型标记：-shared。缺失会导致 gcc/clang 退化成“可执行程序”链接而报缺 _main。
+# （Windows MinGW 块末尾另有 SOFLAGS := -shared 覆盖，保持同一语义）
 SOFLAGS     = -shared
+# 静态库参数
+ARFLAGS = -rcs
 
 # —— 可执行程序构建专用参数 ——
 # 可执行目标文件用 -fPIE（与链接期 -pie 配合，生成位置无关可执行程序）
 BIN_CFLAGS  = -fPIE
 # 可执行程序链接参数：PIE + 装载期加固 + 基础系统库
 # 注意：不含 crypto / ffmpeg，需要的模块自行 LIBS += $(LIB_CRYPTO)
+#   LIBS（含 -lq* 工程库）仅在此处参与最终链接，由可执行程序决定全部依赖。
 LDFLAGS     = -L$(LIB) -L$(SOFT_LIB) -L$(EXT_LIB) \
               -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
               -lpthread -lm -lxml2 -luuid
-
-# 静态库参数
-ARFLAGS = -rcs
 
 # 目标名（各模块 Makefile 覆盖，如 TARGET = libqlog.a）
 TARGET ?= libapp.a
 # 动态库名（默认由静态库名推导，模块可显式覆盖，如 TARGET_SO = libqlog.so）
 TARGET_SO ?= $(TARGET:.a=.so)
 
+# 模块公共头文件名（与 shell/build.sh 头文件归集保持一致：模块目录名 + .h）
+# 例如 lib_src/l_3/q_chan -> q_chan.h；模块亦可显式覆盖 HEADER
+MODNAME = $(notdir $(CURDIR))
+HEADER  ?= $(MODNAME).h
+
 # 分层依赖（各模块 Makefile 逐级追加，如 LIBS += -lqcodec -lqcrypto）
+# 仅用于【可执行程序】最终链接；动态库编译不消费此变量。
 LIBS ?=
 
 # ==============================================
@@ -130,29 +143,32 @@ endif
 # ==============================================
 #  通用业务指令（全局统一规范）
 # ==============================================
-.PHONY: all clean lib_static lib_so install_bin install_lib check_layer format format-check
+.PHONY: all clean lib_static lib_so install_bin install_lib install_hdr check_layer format format-check
 
 ifeq ($(BUILD),bin)
 all: $(TARGET) install_bin
 else
-all: lib_static lib_so install_lib
+# 库构建：编译静态/动态库 -> 搬运到 lib/ -> 归集公共头到 include/
+all: lib_static lib_so install_lib install_hdr
 endif
 
 clean:
 	rm -rf *.o *.a *.so *.dylib *.exe core *.log $(TARGET) api/*.o ut/bin
 
-# 编译静态库
+# 编译静态库（ar 仅归档 .o，不参与链接，故不需要 -l）
 lib_static: $(OBJS)
 	$(AR) $(ARFLAGS) $(TARGET) $(OBJS)
 	-$(RANLIB) $(TARGET)
 
 # 编译动态库（产出 TARGET_SO，库名不含下划线）
 # 用 LIB_CFLAGS(-fPIC) + SOFLAGS(-shared)；绝不引入 LDFLAGS 中的 -pie（专用于可执行程序）
+# 关键约定：动态库编译【不】传入 $(LIBS)，即不 -l 工程内部库；内部依赖
+# 以未决符号形式保留，由最终链接可执行程序时（或运行期经 RUNPATH）统一解析。
 lib_so: $(OBJS)
-	$(CC) $(CFLAGS) $(LIB_CFLAGS) $(SOFLAGS) $(LIB_LDFLAGS) -o $(TARGET_SO) $(OBJS) $(LIBS)
+	$(CC) $(CFLAGS) $(LIB_CFLAGS) $(SOFLAGS) $(LIB_LDFLAGS) -o $(TARGET_SO) $(OBJS)
 
 # 可执行程序统一链接配方（仅 BUILD=bin 时启用；模块需将 TARGET 设为可执行文件名，
-# 且 OBJS 为其源文件；链接用 BIN_CFLAGS + LDFLAGS(-pie 等)）
+# 且 OBJS 为其源文件；链接用 BIN_CFLAGS + LDFLAGS(-pie 等)，并消费 $(LIBS) 全部 -l 依赖）
 ifeq ($(BUILD),bin)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(BIN_CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
@@ -167,6 +183,15 @@ install_bin:
 install_lib:
 	mv -f $(TARGET) $(LIB)/
 	mv -f $(TARGET_SO) $(LIB)/
+
+# 归集对外公共头 --> include/（仅搬运 q_<mod>.h；内部聚合头 headers.h 由模块自管）
+# 与 shell/build.sh 的头文件归集保持一致，使单模块 `make` 也能独立产出可用的 include/ 与 lib/
+install_hdr:
+	@if [ -f "$(HEADER)" ]; then \
+		cp -f "$(HEADER)" "$(INCLUDE)/" && echo "    $(HEADER) -> $(INCLUDE)/"; \
+	else \
+		echo "    (无公共头 $(HEADER)，跳过)"; \
+	fi
 
 # 分层依赖静态检查
 check_layer:
@@ -191,6 +216,8 @@ format-check:
 ifeq ($(shell uname -s),Darwin)
 CFLAGS  += -D_Q_SYS_MACOS
 LDFLAGS += -undefined dynamic_lookup
+# macOS ld64 用 -undefined dynamic_lookup 允许动态库保留未决符号（等价于 GNU 的 --allow-shlib-undefined）
+LIB_LDFLAGS = -L$(LIB) -Wl,-rpath,$(LIB) -undefined dynamic_lookup
 endif
 
 # Linux 兼容适配
@@ -198,6 +225,9 @@ ifeq ($(shell uname -s),Linux)
 CFLAGS  += -D_Q_SYS_LINUX
 # Linux 专属链接期加固（macOS ld64 不支持 -z 参数，不可下移）
 LDFLAGS += -Wl,-z,relro,-z,now -Wl,-z,noexecstack
+# 本项目约定动态库编译不互相 -l（见 lib_so 配方），故可执行程序必须列全传递依赖，
+# 并用 --no-as-needed 强制把所有 q_* 写入 NEEDED，运行期方可由 loader 统一加载解析。
+LDFLAGS += -Wl,--no-as-needed
 endif
 
 # Windows MinGW 兼容适配

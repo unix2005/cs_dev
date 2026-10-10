@@ -28,7 +28,7 @@ static void *tpool_worker(void *arg)
             pthread_cond_signal(&p->not_full);
         pthread_mutex_unlock(&p->mtx);
 
-        t->fn(t->arg);                 /* 在锁外执行任务 */
+        t->fn(t->arg); /* 在锁外执行任务 */
         free(t);
     }
     return NULL;

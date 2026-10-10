@@ -13,6 +13,7 @@ logs/*
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
+Makefile
 *.cmake
 
 # 编译中间产物

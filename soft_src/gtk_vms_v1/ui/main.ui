@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <object class="GtkApplicationWindow" id="main_window">
+    <property name="title">车辆管理系统</property>
+    <property name="default-width">1100</property>
+    <property name="default-height">720</property>
+    <child>
+      <object class="GtkBox" id="root_box">
+        <property name="orientation">vertical</property>
+        <property name="spacing">0</property>
+
+        <!-- 导航 / 菜单栏 -->
+        <child>
+          <object class="GtkBox" id="nav_box">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">10</property>
+            <property name="margin-start">8</property>
+            <property name="margin-end">8</property>
+            <property name="margin-top">6</property>
+            <property name="margin-bottom">6</property>
+            <style>
+              <class name="nav-bar"/>
+            </style>
+            <child>
+              <object class="GtkMenuButton" id="menubtn">
+                <property name="label">☰ 菜单</property>
+                <property name="halign">start</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel" id="nav_title">
+                <property name="label">车辆管理</property>
+                <property name="hexpand">True</property>
+                <property name="halign">start</property>
+                <property name="name">nav-title</property>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- 数据区：左树 + 右(地图/表格) -->
+        <child>
+          <object class="GtkPaned" id="data_paned">
+            <property name="orientation">horizontal</property>
+            <property name="vexpand">True</property>
+            <property name="position">280</property>
+            <child>
+              <object class="GtkScrolledWindow" id="tree_scroll">
+                <property name="propagate-natural-width">True</property>
+                <child>
+                  <object class="GtkTreeView" id="org_tree">
+                    <property name="headers-visible">True</property>
+                    <property name="name">org-tree</property>
+                  </object>
+                </child>
+              </object>
+            </child>
+            <child type="end">
+              <object class="GtkPaned" id="right_paned">
+                <property name="orientation">vertical</property>
+                <property name="position">320</property>
+                <child>
+                  <object class="GtkFrame" id="map_frame">
+                    <property name="label">地图</property>
+                    <property name="vexpand">True</property>
+                    <child>
+                      <object class="GtkDrawingArea" id="map_area">
+                        <property name="hexpand">True</property>
+                        <property name="vexpand">True</property>
+                        <property name="name">map-area</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+                <child type="end">
+                  <object class="GtkScrolledWindow" id="table_scroll">
+                    <property name="vexpand">True</property>
+                    <child>
+                      <object class="GtkTreeView" id="data_table">
+                        <property name="name">data-table</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- 状态栏（暂空） -->
+        <child>
+          <object class="GtkBox" id="status_box">
+            <property name="orientation">horizontal</property>
+            <property name="height-request">26</property>
+            <style>
+              <class name="status-bar"/>
+            </style>
+            <child>
+              <object class="GtkLabel" id="status_label">
+                <property name="label"></property>
+                <property name="margin-start">8</property>
+                <property name="halign">start</property>
+              </object>
+            </child>
+          </object>
+        </child>
+
+      </object>
+    </child>
+  </object>
+</interface>
