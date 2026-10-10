@@ -25,6 +25,8 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <errno.h>              /* 错误号：所有系统调用/IO 错误处理统一经此 */
+#include <limits.h>
 
 // 跨平台文件、IO兼容
 #ifdef Q_SYS_WINDOWS

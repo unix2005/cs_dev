@@ -6,6 +6,7 @@
 #include "q_util.h"
 
 #include <string.h>
+#include <limits.h>
 
 static int g_fail = 0;
 
@@ -77,6 +78,25 @@ int main(void)
     char rtrim_all[] = "   ";
     CHECK(strcmp(q_util_str_rtrim(rtrim_all), "") == 0, "rtrim 全空白 -> 空串");
     CHECK(q_util_str_rtrim(NULL) == NULL, "rtrim NULL -> NULL");
+
+    /* ============ 时间字符串比较 ============ */
+    CHECK(q_util_time_cmp("20240101120000", "20240101120001") < 0, "time_cmp a<b");
+    CHECK(q_util_time_cmp("20240101120001", "20240101120000") > 0, "time_cmp a>b");
+    CHECK(q_util_time_cmp("20240101120000", "20240101120000") == 0, "time_cmp 相等");
+    CHECK(q_util_time_cmp("20231231000000", "20240101000000") < 0, "time_cmp 跨年 a<b");
+    CHECK(q_util_time_cmp("20240229000000", "20240228000000") > 0, "time_cmp 2/29 晚于 2/28");
+    CHECK(q_util_time_cmp(NULL, "20240101120000") == INT_MIN, "time_cmp NULL -> INT_MIN");
+    CHECK(q_util_time_cmp("2024010112000", "20240101120000") == INT_MIN, "time_cmp 长度不足 -> INT_MIN");
+    CHECK(q_util_time_cmp("2024-01-01-0000", "20240101120000") == INT_MIN, "time_cmp 含非数字 -> INT_MIN");
+
+    /* 非法日历值校验 */
+    CHECK(q_util_time_cmp("20251301000000", "20240101120000") == INT_MIN, "time_cmp 13月 -> INT_MIN");
+    CHECK(q_util_time_cmp("20250230000000", "20240101120000") == INT_MIN, "time_cmp 2/30 -> INT_MIN");
+    CHECK(q_util_time_cmp("20250229000000", "20240101120000") == INT_MIN, "time_cmp 2025非闰年2/29 -> INT_MIN");
+    CHECK(q_util_time_cmp("20250101240000", "20240101120000") == INT_MIN, "time_cmp 24时 -> INT_MIN");
+    CHECK(q_util_time_cmp("20250101122460", "20240101120000") == INT_MIN, "time_cmp 60秒 -> INT_MIN");
+    /* 闰年 2024-02-29 合法，仍可正常比较 */
+    CHECK(q_util_time_cmp("20240229000000", "20240228000000") > 0, "time_cmp 闰年2/29 合法且晚于2/28");
 
     /* ============ 时间格式化 ============ */
     char tb[32];

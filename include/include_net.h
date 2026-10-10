@@ -36,6 +36,10 @@
 // 修复macOS无endian.h问题，全平台字节序兼容
 #if defined(Q_SYS_LINUX)
 #include <endian.h>
+// Linux 特有：事件多路复用、POSIX 定时器、Unix 域套接字（网络/事件子系统依赖）
+#include <sys/epoll.h>
+#include <sys/timerfd.h>
+#include <sys/un.h>
 #elif defined(Q_SYS_MACOS)
 #include <libkern/OSByteOrder.h>
 #define htobe16(x) OSSwapHostToBigInt16(x)

@@ -5,8 +5,6 @@
 #include "headers.h"
 #include "q_crypto.h"
 
-#include <string.h>
-
 static int g_fail = 0;
 
 #define CHECK(cond, msg)                              \

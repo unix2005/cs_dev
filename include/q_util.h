@@ -43,6 +43,10 @@ extern "C"
     /* 时间格式化：写入 "YYYY-MM-DD HH:MM:SS" 到 buf，返回写入字符数（不含 NUL）；buf 空返回 0 */
     size_t q_util_time_format(time_t t, char *buf, size_t buf_size);
 
+    /* 时间字符串比较：格式 yyyymmddhhmmss（24h）。返回 strcmp 语义（<0/0/>0）；
+       入参非法（NULL/长度非14/含非数字/非合法日历时间）一律返回 INT_MIN。 */
+    int q_util_time_cmp(const char *a, const char *b);
+
 #ifdef __cplusplus
 }
 #endif

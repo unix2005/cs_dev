@@ -63,8 +63,8 @@ EXT_LIB  = $(TONGSUO_HOME)/lib
 # ==============================================
 # 公共编译参数（库与可执行程序共用）：包含路径、优化、告警、栈保护、宏定义
 # 注意：此处不含 -fPIE / -fPIC / -pie，这些按“库 / 可执行程序”分类放到下方专用变量
-CFLAGS = -I$(INCLUDE) -I$(INCLUDE) \
-         -I$(SOFT_INCL) -I$(EXT_INCL) -I. \
+CFLAGS = -I. -I$(INCLUDE) \
+         -I$(SOFT_INCL) -I$(EXT_INCL) \
          -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
          -Wall -Wextra -Wcast-align -Wwrite-strings -Wpointer-arith \
          -Wstrict-prototypes -Wmissing-prototypes -Wunreachable-code \
@@ -82,7 +82,10 @@ endif
 # 库目标文件必须 -fPIC（位置无关，方可链入 .a/.so 及 PIE 可执行程序）
 LIB_CFLAGS  = -fPIC
 # 库链接参数（动态库用 -shared；静态库无额外链接参数）
-LIB_LDFLAGS =
+# 动态库需能定位本工程其它 q_* 依赖库：补 -L$(LIB) 供链接期检索，
+# 并写入 -Wl,-rpath,$(LIB) 作为 RUNPATH，使本 .so 的“传递依赖”
+# （如 libqnet.so 依赖 libqreactor.so）在运行时也能从 lib/ 解析。
+LIB_LDFLAGS = -L$(LIB) -Wl,-rpath,$(LIB)
 SOFLAGS     = -shared
 
 # —— 可执行程序构建专用参数 ——

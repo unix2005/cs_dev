@@ -1,15 +1,16 @@
 /**
  * @file q_crypto_sm2_internal.h
  * @brief q_crypto 内部 SM2 DER 密钥导入/导出辅助（静态内联，由各 sm2_*.c 复用）
- * @note  本文件被 headers.h 在 <openssl/evp.h> 之后引入，故 EVP_PKEY 等类型已可用；
+ * @note  本文件被 headers.h 在 include_tongsuo.h（<openssl/evp.h> 等）之后引入，
+ *        故 EVP_PKEY 等类型已可用；
  *        禁止再 include headers.h（否则环形包含）；仅声明静态内联，不生成独立符号。
  */
 #ifndef Q_CRYPTO_SM2_INTERNAL_H
 #define Q_CRYPTO_SM2_INTERNAL_H
 
-#include <stdint.h>
-/* 注：本文件被 headers.h 在 <openssl/evp.h>/<openssl/x509.h> 之后引入，
-   EVP_PKEY / d2i_PUBKEY / i2d_PUBKEY 等类型已可用，故此处仅保留 stdint.h。 */
+#include "include_stdio.h"      /* 统一走聚合头（提供 uintN_t / size_t 等标准类型） */
+/* 注：本文件被 headers.h 在 include_tongsuo.h（openssl 头）之后引入，
+   EVP_PKEY / d2i_PUBKEY / i2d_PUBKEY 等类型已可用，故此处仅依赖 include_stdio.h。 */
 
 static EVP_PKEY *q_crypto_sm2_load_priv(const uint8_t *der, size_t len)
 {
