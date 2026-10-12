@@ -115,8 +115,9 @@ BIN_CFLAGS  = -fPIE
 #   crypto/ffmpeg 见上方 LIB_CRYPTO / LIB_FFMPEG；基础系统库见 LIB_PTHREAD/LIB_M/
 #   LIB_XML2/LIB_UUID。需要它们的模块自行 LIBS += $(LIB_PTHREAD) $(LIB_XML2) ...
 #   LIBS（含 -lq* 工程库及上述按需系统库）仅在此处参与最终链接，由可执行程序决定全部依赖。
-LDFLAGS     = -L$(LIB) -L$(SOFT_LIB) -L$(EXT_LIB) \
-              -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
+# 基础仅含库搜索路径；-pie / -z 装载期加固为 Linux 专属（见下方 Linux 块），
+# macOS ld64 不支持 -z，且 PIE 为默认，故不在此处写入。
+LDFLAGS     = -L$(LIB) -L$(SOFT_LIB) -L$(EXT_LIB)
 
 # 目标名（各模块 Makefile 覆盖，如 TARGET = libqlog.a）
 TARGET ?= libapp.a
@@ -248,8 +249,9 @@ endif
 # Linux 兼容适配
 ifeq ($(shell uname -s),Linux)
 CFLAGS  += -D_Q_SYS_LINUX
-# Linux 专属链接期加固（macOS ld64 不支持 -z 参数，不可下移）
-LDFLAGS += -Wl,-z,relro,-z,now -Wl,-z,noexecstack
+# Linux 专属链接期加固（macOS ld64 不支持 -z 参数，故仅 Linux 块启用）；
+# -pie 原在基础 LDFLAGS，因 macOS 默认 PIE 且不支持该标志，一并移入此块。
+LDFLAGS += -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
 # 本项目约定动态库编译不互相 -l（见 lib_so 配方），故可执行程序必须列全传递依赖，
 # 并用 --no-as-needed 强制把所有 q_* 写入 NEEDED，运行期方可由 loader 统一加载解析。
 LDFLAGS += -Wl,--no-as-needed
@@ -262,4 +264,14 @@ LDFLAGS := $(filter-out -fPIE -pie,$(LDFLAGS))
 SOFLAGS := -shared
 # Windows 动态库扩展名为 .dll
 TARGET_SO = $(TARGET:.a=.dll)
+endif
+
+# —— 静态库分组（解决库间循环依赖）——
+# GNU ld 用 --start-group/--end-group 在多个静态库间循环解析未决符号；
+# macOS ld64 不支持分组语法，改用 -force_load 逐库强制加载全部成员（等价语义）。
+# 模块用法：QLIBS = $(call ld_group, $(LIB)/libqxxx.a $(LIB)/libqyyy.a ...)
+ifeq ($(shell uname -s),Darwin)
+ld_group = $(foreach l,$(1),-force_load $(l))
+else
+ld_group = -Wl,--start-group $(1) -Wl,--end-group
 endif

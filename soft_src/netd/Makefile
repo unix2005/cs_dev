@@ -14,12 +14,11 @@ OBJS    = main.o
 
 # —— 分层依赖：本项目库静态链接(.a)，运行期不依赖 libq*.so；
 #    外部库(pthread / Tongsuo)仅在最终可执行程序链接期引入 ——
-QLIBS  = -Wl,--start-group \
+QLIBS  = $(call ld_group, \
          $(LIB)/libqcommon.a $(LIB)/libqreactor.a $(LIB)/libqnet.a \
          $(LIB)/libqchan.a $(LIB)/libqsec.a $(LIB)/libqcodec.a \
          $(LIB)/libqipc.a $(LIB)/libqcrypto.a $(LIB)/libqrand.a \
-         $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a \
-         -Wl,--end-group
+         $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
 LIBS   = $(QLIBS) $(LIB_PTHREAD) -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64
 # 注：seccomp 待 q_common 真正实现后，本处追加 $(LIB_SECCOMP)
 

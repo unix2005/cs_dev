@@ -47,3 +47,6 @@ minimal_svc_shared
 open_src/
 tongsuo/
 soft_src/macos_vms_v1/macos_vms_v1
+bin/q_service_knockd
+bin/q_service_bizd
+bin/q_service_netd
