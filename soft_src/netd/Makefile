@@ -9,7 +9,7 @@
 # ==============================================
 
 BUILD   = bin
-TARGET  = netd
+TARGET  = q_service_netd
 OBJS    = main.o
 
 # —— 分层依赖：本项目库静态链接(.a)，运行期不依赖 libq*.so；

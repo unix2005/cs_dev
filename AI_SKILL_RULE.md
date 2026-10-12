@@ -181,7 +181,7 @@ graph TD
 2. **严禁跨层跳跃**：l\_3 允许调用 l\_1（无需经由 l\_2 转包），但 l\_1 绝不允许向上调用
 3. **同层禁止互相调用**：l\_N 内部各模块之间原则上不得互相依赖；确有共享代码时，**必须下沉到下一层**（如 l\_2 两个模块共用逻辑 → 下沉至 l\_1），特殊情况须经用户确认并登记
 4. **禁止循环依赖**：任意两个模块间不得形成引用环
-5. **第三方库收敛**：**Tongsuo 只允许 `l_1/q_crypto`（产物 `libqcrypto`）直接调用**，上层一律经由 `libqcrypto` 封装接口使用；只有 `q_crypto` 的 Makefile 允许 `LIBS += $(LIB_CRYPTO)`；FFmpeg 例外，允许 `soft_src/client` 与视频模块直接调用
+5. **第三方库收敛（Tongsuo 链接收敛到最终可执行程序）**：国密原语由 `l_1/q_crypto`（产物 `libqcrypto`）封装，上层一律经其接口使用密码能力；**`libqcrypto` 的 `.a`/`.so` 本身不链入 Tongsuo**（链接期不带 `-lcrypto -lssl`），其 `EVP_*`/`EC_*` 等第三方符号以未决形式保留；**Tongsuo 仅在最终可执行程序（soft_src/* 的 Makefile）链接期经 `-L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO)` 引入并写 `-Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64`**（运行期定位 `libcrypto.so`/`libssl.so`）。FFmpeg 例外，允许 `soft_src/client` 与视频模块直接调用
 6. **新增模块必须先定层**：新增任何 lib\_src 模块时，AI 必须先声明其**归属层级、`q_` 库名、依赖的 `q_*` 库清单**，三项齐全方可创建
 7. **新库必须同步登记三处**：模块目录 `lib_src/l_N/q_xxx/`、`Makefile`（含逐级 `-lq_*` 依赖）、`shell/` 总构建脚本的编译顺序；缺任一处不得提交
 8. **创建源代码规则**: 每个函数一个源文件，每个源文件一个 `q_xxx` 函数，每个函数控制在500行以内，最多不超过1500行
@@ -214,9 +214,12 @@ include ../../../include/Makefile.inc     # 或 include ${SOFT_HOME}/include/Mak
 ```
 
 - **链接顺序铁律**：本模块 → l\_3 → l\_2 → l\_1（**高级在前、低级在后**）；顺序错误即视为分层违规
-- 公共配置 `include/Makefile.inc` 已按“库 / 可执行程序”两类拆分编译链接参数：公共 `CFLAGS`；库专用 `LIB_CFLAGS(-fPIC) / SOFLAGS(-shared) / LIB_LDFLAGS`；可执行程序专用 `BIN_CFLAGS(-fPIE) / LDFLAGS(-pie …)`；并以 `BUILD ?= lib`（模块可覆盖为 `bin`）决定目标文件参数与 `all` 流程。另统一提供 `CC / AR / TARGET / TARGET_SO / LIBS / $(LIB_CRYPTO)` 及 `lib_static / lib_so / install_lib / install_bin / clean / check_layer / format / format-check` 目标；**子 Makefile 只能用 `+=` 追加，禁止重定义 `CC` 或覆盖安全编译参数**
+- 公共配置 `include/Makefile.inc` 已按“库 / 可执行程序”两类拆分编译链接参数：公共 `CFLAGS`；库专用 `LIB_CFLAGS(-fPIC) / SOFLAGS(-shared) / LIB_LDFLAGS`；可执行程序专用 `BIN_CFLAGS(-fPIE) / LDFLAGS(-pie …)`；并以 `BUILD ?= lib`（模块可覆盖为 `bin`）决定目标文件参数与 `all` 流程。另统一提供 `CC / AR / TARGET / TARGET_SO / LIBS / $(LIB_CRYPTO)` 及 `lib_static / lib_so / install_lib / install_bin / clean / check_layer / format / format-check` 目标；**子 Makefile 只能用 `+=` 追加，禁止重定义 `CC`、覆盖安全编译参数，或重定义公共目标 `install_hdr` / `clean`**：
+  - **对外头归集**：各 `q_xxx` 模块的 `install_hdr` 由 `Makefile.inc` 通用配方处理（默认 `HEADER ?= $(MODNAME).h`，自动把 `q_xxx.h` 拷至 `include/`）；子 Makefile **不得重写 `install_hdr:`**，否则报 "overriding recipe for target" 告警且以最后一份配方为准（易误判）。仅需特殊头时，设 `HEADER` 变量或保持默认即可。
+  - **清理分支依据 `BUILD`**：`clean` 对 `BUILD=lib` 删 `$(LIB)/$(TARGET)`、`$(LIB)/$(TARGET_SO)`、`$(INCLUDE)/$(HEADER)`；对 `BUILD=bin` 删 `$(BIN)/$(TARGET)`。判定**必须基于 `BUILD`，不得用 `[ -n "$(TARGET_SO)" ]`**——因 bin 模块 `TARGET` 无 `.a` 后缀，`$(TARGET:.a=.so)` 不产生替换、`TARGET_SO` 仍非空，会误判成库模块而漏清 `bin/` 产物。**
 - 提供 `shell/check_layer.sh` 静态扫描：解析所有 `#include` 与本模块 Makefile 的 `-lq*` 列表，上报「l\_N 引用了 l\_M（M > N）」、同层互引、库名含下划线、以及 Makefile 中缺失的下层依赖，作为 CI 必过项
 - **代码格式化统一用 clangd / clang-format**：工程根目录已提供 `.clang-format`（样式：4 空格缩进、Allman 花括号、指针靠右、保留 `#include` 顺序）与 `.clangd`（声明 `-Iinclude` 等自定义头路径，使 clangd 无需 `compile_commands.json` 即可解析）；编辑器由 clangd 按 `.clang-format` 自动格式化，命令行用 `make format`（本模块就地重写）/ `make format-check`（CI 检查，不匹配则非零退出）
+- **soft_src 可执行程序链接约定（项目库静态链入、外部库仅 exe 期引入）**：soft_src/* 的 Makefile 将本项目全部 `q_*` 库以 `-Wl,--start-group $(LIB)/libq*.a -Wl,--end-group` **静态链入可执行文件**（运行期不依赖 `libq*.so`，彻底规避 RUNPATH / 传递依赖问题）；依赖闭包在 `QLIBS` 中显式全列（高级在前、低级在后），与 `lib_static/lib_so` 不消费 `$(LIBS)` 的约定一致；外部依赖（`$(LIB_PTHREAD)`、Tongsuo）**只在最终 exe 链接期引入**：`-L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64`
 
 ## 四、AI 编译 \& 构建约束
 
