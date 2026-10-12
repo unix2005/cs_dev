@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/unix2005266/gtkvmsv2">
+    <file preprocess="xml-stripblanks">vmsv2-window.ui</file>
+    <file preprocess="xml-stripblanks">gtk/help-overlay.ui</file>
+  </gresource>
+</gresources>

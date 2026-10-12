@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=vmsv2
+Exec=vmsv2
+Icon=io.github.unix2005266.gtkvmsv2
+Terminal=false
+Type=Application
+Categories=GTK;
+StartupNotify=true

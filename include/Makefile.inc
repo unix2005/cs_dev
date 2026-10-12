@@ -58,6 +58,12 @@ LIB_CRYPTO    = -lssl -lcrypto
 # FFMPEG_HOME ?= $(SOFT_HOME)/open_src/ffmpeg
 # LIB_FFMPEG  = -lavformat -lavcodec -lavutil -lswscale
 
+# 基础系统库（按需）：不全局强制链接，需要它们的可执行程序/库自行 LIBS += 对应变量
+LIB_PTHREAD = -lpthread
+LIB_M       = -lm
+LIB_XML2    = -lxml2
+LIB_UUID    = -luuid
+
 EXT_INCL = $(TONGSUO_HOME)/include
 EXT_LIB  = $(TONGSUO_HOME)/lib
 
@@ -100,12 +106,13 @@ ARFLAGS = -rcs
 # —— 可执行程序构建专用参数 ——
 # 可执行目标文件用 -fPIE（与链接期 -pie 配合，生成位置无关可执行程序）
 BIN_CFLAGS  = -fPIE
-# 可执行程序链接参数：PIE + 装载期加固 + 基础系统库
-# 注意：不含 crypto / ffmpeg，需要的模块自行 LIBS += $(LIB_CRYPTO)
-#   LIBS（含 -lq* 工程库）仅在此处参与最终链接，由可执行程序决定全部依赖。
+# 可执行程序链接参数：PIE + 装载期加固
+# 注意：不含任何系统库（含 -lc 由链接器默认提供）。第三方/系统库均“按需加入”：
+#   crypto/ffmpeg 见上方 LIB_CRYPTO / LIB_FFMPEG；基础系统库见 LIB_PTHREAD/LIB_M/
+#   LIB_XML2/LIB_UUID。需要它们的模块自行 LIBS += $(LIB_PTHREAD) $(LIB_XML2) ...
+#   LIBS（含 -lq* 工程库及上述按需系统库）仅在此处参与最终链接，由可执行程序决定全部依赖。
 LDFLAGS     = -L$(LIB) -L$(SOFT_LIB) -L$(EXT_LIB) \
-              -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack \
-              -lpthread -lm -lxml2 -luuid
+              -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
 
 # 目标名（各模块 Makefile 覆盖，如 TARGET = libqlog.a）
 TARGET ?= libapp.a

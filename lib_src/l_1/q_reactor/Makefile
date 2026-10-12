@@ -31,11 +31,13 @@ OBJS = \
     api/q_reactor_timer_arm.o
 
 # q_reactor 不依赖其它 q_* 模块（epoll/timer 为平台系统调用，worker 池/分发核心均在本模块内）
-LIBS =
+# pthread 为 worker 池/事件源所需，属系统库，按需加入（见 include/Makefile.inc 的 LIB_PTHREAD）
 
 include ../../../include/Makefile.inc
+
+LIBS += $(LIB_PTHREAD)
 
 # 单元测试（Linux 下：make ut  ->  ut/bin/q_reactor_ut）
 .PHONY: ut
 ut: $(OBJS) ut/q_reactor_ut.c
-	$(CC) $(CFLAGS) $(OBJ_CFLAGS) -o ut/bin/q_reactor_ut ut/q_reactor_ut.c $(OBJS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(OBJ_CFLAGS) -o ut/bin/q_reactor_ut ut/q_reactor_ut.c $(OBJS) $(LDFLAGS) $(LIBS)

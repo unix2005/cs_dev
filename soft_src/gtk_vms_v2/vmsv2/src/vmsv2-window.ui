@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.0"/>
+
+  <template class="Vmsv2Window" parent="GtkApplicationWindow">
+    <property name="default-width">600</property>
+    <property name="default-height">300</property>
+
+    <!-- titlebar：自定义窗口标题栏，替换系统默认标题栏 -->
+    <property name="titlebar">
+      <object class="GtkHeaderBar" id="header_bar">
+        <!-- child type="end"：子控件放在标题栏**右侧**（end端；start代表左侧） -->
+        <child type="start">
+          <object class="GtkMenuButton">
+          
+            <property name="primary">True</property>
+            
+            <!-- 图标名称，使用系统图标库：三条横线菜单图标 -->
+            <property name="icon-name">open-menu-symbolic</property>
+
+            <!-- 鼠标悬浮提示文字，translatable="yes" 支持多语言翻译 -->
+            <property name="tooltip-text" translatable="yes">Menu</property>
+
+            <!-- 绑定菜单模型，引用下方id="primary_menu"的菜单定义 -->
+            <property name="menu-model">primary_menu</property>
+
+          </object>
+        </child>
+      </object>
+    </property>
+
+    <!-- 窗口主内容区域（窗口的子控件） -->
+    <property name="child">
+      <!-- GtkLabel 文本标签控件，id=label -->
+      <object class="GtkLabel" id="label">
+        <property name="label">Hello, World!</property>
+
+        <!-- CSS样式类，GTK内置样式类 title-1，大标题字体 -->
+        <style>
+          <class name="title-1"/>
+        </style>
+
+      </object>
+    </property>
+  </template>
+
+  <!-- ========== 菜单模型定义，id=primary_menu 被上面MenuButton引用 ========== -->
+  <menu id="primary_menu">
+    <!-- section：菜单分组，视觉上会自动加分隔线 -->
+    <section>
+
+      <!-- 菜单项1：首选项 -->
+      <item>
+        <!-- 下划线_：快捷键Alt+P；translatable=yes支持国际化翻译 -->
+        <attribute name="label" translatable="yes">_Preferences</attribute>
+        <!-- action：动作名称，app. 代表应用级Action，代码需要注册app.preferences回调函数 -->
+        <attribute name="action">app.preferences</attribute>
+      </item>
+
+      <!-- 菜单项2：快捷键弹窗 -->
+      <item>
+        <attribute name="label" translatable="yes">_Keyboard Shortcuts</attribute>
+        <!-- win. 窗口级Action，show-help-overlay 是GTK内置动作，直接弹出快捷键帮助面板，无需自己写逻辑 -->
+        <attribute name="action">win.show-help-overlay</attribute>
+      </item>
+
+      <!-- 菜单项3：关于页面 -->
+      <item>
+        <attribute name="label" translatable="yes">_About Vmsv2</attribute>
+        <attribute name="action">app.about</attribute>
+      </item>
+    </section>
+
+  </menu>
+
+</interface>

@@ -1,0 +1,6 @@
+data/io.github.unix2005266.gtkvmsv2.desktop.in
+data/io.github.unix2005266.gtkvmsv2.metainfo.xml.in
+data/io.github.unix2005266.gtkvmsv2.gschema.xml
+src/main.c
+src/vmsv2-window.c
+src/vmsv2-window.ui
