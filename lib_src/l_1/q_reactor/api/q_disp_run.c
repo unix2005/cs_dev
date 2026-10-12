@@ -26,6 +26,29 @@ static void q_disp_local_drain(q_disp_t *d)
     }
 }
 
+/* 跨平台 poll：POSIX 直接用 poll()；Windows 用 WSAPoll（本模块的 fd 实为 SOCKET 值） */
+#ifdef Q_SYS_WINDOWS
+static int q_poll(struct pollfd *pf, int n, int timeout_ms)
+{
+    WSAPOLLFD *fds = (WSAPOLLFD *)malloc((size_t)n * sizeof(*fds));
+    if (!fds)
+        return -1;
+    for (int i = 0; i < n; i++)
+    {
+        fds[i].fd = (SOCKET)pf[i].fd;
+        fds[i].events = (SHORT)pf[i].events;
+        fds[i].revents = 0;
+    }
+    int r = WSAPoll(fds, (ULONG)n, timeout_ms);
+    for (int i = 0; i < n; i++)
+        pf[i].revents = (short)fds[i].revents;
+    free(fds);
+    return r;
+}
+#else
+#define q_poll(pf, n, t) poll(pf, n, t)
+#endif
+
 int q_disp_run(q_disp_t *d, int timeout_ms)
 {
     if (!d)
@@ -62,7 +85,7 @@ int q_disp_run(q_disp_t *d, int timeout_ms)
         }
     }
 
-    int rc = poll(pf, k, timeout_ms);
+    int rc = q_poll(pf, k, timeout_ms);
     if (rc < 0)
     {
         int e = errno;
@@ -79,8 +102,13 @@ int q_disp_run(q_disp_t *d, int timeout_ms)
         if (idxmap[i] == -1 && (pf[i].revents & POLLIN))
         {
             char buf[64];
+#ifdef Q_SYS_WINDOWS
+            while (recv(d->wake_r, buf, (int)sizeof(buf), 0) > 0)
+                ;
+#else
             while (read(d->wake_r, buf, sizeof(buf)) > 0)
                 ;
+#endif
             break;
         }
     }

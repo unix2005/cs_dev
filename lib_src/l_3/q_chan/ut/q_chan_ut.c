@@ -11,7 +11,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 
-static int g_sfd = -1;
+static q_fd_t g_sfd = (q_fd_t)-1;
 static q_chan_t *g_server = NULL;
 
 static void *srv_thread(void *arg)
@@ -33,33 +33,36 @@ int main(void)
 {
     uint8_t *s_priv = NULL, *s_pub = NULL;
     size_t s_plen = 0, s_ulen = 0;
+
+    printf("q_chan_ut: start\n");
     if (q_crypto_sm2_keygen(&s_priv, &s_plen, &s_pub, &s_ulen) != 0)
     {
         printf("FAIL: sm2 keygen\n");
         return 1;
     }
-
+    printf("q_chan_ut: server keygen\n");
     g_server = q_chan_create(Q_CHAN_MODE_SERVER, s_priv, s_plen, s_pub, s_ulen, NULL, 0, 1, 0);
     if (!g_server)
     {
         printf("FAIL: server create\n");
         return 1;
     }
+    printf("q_chan_ut: client keygen\n");
     q_chan_t *client = q_chan_create(Q_CHAN_MODE_CLIENT, NULL, 0, NULL, 0, s_pub, s_ulen, 1, 0);
     if (!client)
     {
         printf("FAIL: client create\n");
         return 1;
     }
-
+    printf("q_chan_ut: socketpair\n");
     int fds[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
     {
         printf("FAIL: socketpair\n");
         return 1;
     }
-    g_sfd = fds[1];
-    int cfd = fds[0];
+    g_sfd = (q_fd_t)fds[1];
+    q_fd_t cfd = (q_fd_t)fds[0];
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0)
@@ -67,23 +70,25 @@ int main(void)
         printf("FAIL: pthread_create\n");
         return 1;
     }
+    printf("q_chan_ut: client handshake\n");
     if (q_chan_handshake(client, cfd) != 0)
     {
         printf("FAIL: client handshake\n");
         return 1;
     }
+    printf("q_chan_ut: client join\n");
     if (pthread_join(tid, NULL) != 0)
     {
         printf("FAIL: pthread_join\n");
         return 1;
     }
-
+    printf("q_chan_ut: client transmit\n");
     if (q_chan_transmit(client, cfd, (const uint8_t *)"hello", 5, 0x10) != 0)
     {
         printf("FAIL: transmit\n");
         return 1;
     }
-
+    printf("q_chan_ut: chan binding\n");
     /* 通道绑定一致性：双方应得到相同的绑定材料 */
     uint8_t b1[32], b2[32];
     if (q_chan_binding(client, b1) != 0 || q_chan_binding(g_server, b2) != 0)

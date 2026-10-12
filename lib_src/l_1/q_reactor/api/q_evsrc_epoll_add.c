@@ -6,7 +6,7 @@
 #include "q_reactor.h"
 #include "q_evsrc_int.h"
 
-int q_evsrc_epoll_add(q_evsrc_epoll_t *e, int fd, uint32_t events,
+int q_evsrc_epoll_add(q_evsrc_epoll_t *e, q_fd_t fd, uint32_t events,
                       q_reactor_handler_t h, void *ctx)
 {
 #ifdef __linux__

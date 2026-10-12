@@ -17,6 +17,7 @@
 #define L_3_Q_CHAN_H
 
 #include "include_stdio.h"
+#include "include_net.h"   /* 提供跨平台句柄类型 q_fd_t（POSIX=int / Windows=uint64_t） */
 
 #ifdef __cplusplus
 extern "C"
@@ -45,7 +46,7 @@ extern "C"
 
     /* 执行 SM2 ECDH 握手（阻塞，经 fd 收发协商材料）。成功 0，失败 -1。
    握手后通道进入可收发状态，并生成会话密钥与通道绑定材料。 */
-    int q_chan_handshake(q_chan_t *c, int fd);
+    int q_chan_handshake(q_chan_t *c, q_fd_t fd);
 
     /* 加密编码：plain(plen) -> out（包头 + SM4-GCM 密文 + tag）。
    outcap 需 >= 44 + plen + 16；outlen 返回编码后字节数。成功 0，失败 -1。 */
@@ -58,10 +59,10 @@ extern "C"
                     uint16_t *cmd_out);
 
     /* 便捷传输：经 fd 阻塞发送（内部 q_chan_send + q_net 阻塞写）。成功 0，失败 -1。 */
-    int q_chan_transmit(q_chan_t *c, int fd, const uint8_t *plain, size_t plen, uint16_t cmd);
+    int q_chan_transmit(q_chan_t *c, q_fd_t fd, const uint8_t *plain, size_t plen, uint16_t cmd);
 
     /* 便捷接收：经 fd 阻塞读取完整数据包并解密（内部 q_net 阻塞读 + q_chan_recv）。成功 0，失败 -1。 */
-    int q_chan_receive(q_chan_t *c, int fd, uint8_t *plain, size_t plaincap, size_t *plainlen, uint16_t *cmd_out);
+    int q_chan_receive(q_chan_t *c, q_fd_t fd, uint8_t *plain, size_t plaincap, size_t *plainlen, uint16_t *cmd_out);
 
     /* 通道绑定：SM3(session_key) -> out(32)。未握手返回 -1。
    用于上层将 Token / 会话绑定到本通道，防止跨通道伪造。 */

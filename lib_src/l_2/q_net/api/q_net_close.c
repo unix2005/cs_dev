@@ -5,9 +5,9 @@
 #include "headers.h"
 #include "q_net.h"
 
-int q_net_close(int fd)
+int q_net_close(q_fd_t fd)
 {
-    if (fd < 0)
+    if (fd == (q_fd_t)-1)
         return -1;
-    return close(fd);
+    return Q_SOCK_CLOSE(fd);
 }

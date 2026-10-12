@@ -6,7 +6,7 @@
 #include "q_chan.h"
 #include "q_chan_int.h"
 
-int q_chan_transmit(q_chan_t *c, int fd, const uint8_t *plain, size_t plen, uint16_t cmd)
+int q_chan_transmit(q_chan_t *c, q_fd_t fd, const uint8_t *plain, size_t plen, uint16_t cmd)
 {
     if (!c || !c->established)
         return -1;

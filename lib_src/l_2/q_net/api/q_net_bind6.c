@@ -5,12 +5,12 @@
 #include "headers.h"
 #include "q_net.h"
 
-int q_net_bind6(int port, int *fd_out)
+int q_net_bind6(int port, q_fd_t *fd_out)
 {
     if (port <= 0 || !fd_out)
         return -1;
-    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (fd < 0)
+    q_fd_t fd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (fd == (q_fd_t)-1)
         return -1;
 
     int one = 1;
@@ -24,7 +24,7 @@ int q_net_bind6(int port, int *fd_out)
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
-        close(fd);
+        Q_SOCK_CLOSE(fd);
         return -1;
     }
     *fd_out = fd;

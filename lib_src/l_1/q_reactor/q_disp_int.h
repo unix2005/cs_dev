@@ -19,8 +19,8 @@ struct q_disp
     int          nworkers;
     q_evsrc_t  **srcs;       /* 已挂载的事件源插件数组（指针稳定） */
     size_t       nsrc, capsrc;
-    int          wake_r;     /* 唤醒管道读端（poll 监听） */
-    int          wake_w;     /* 唤醒管道写端（跨线程唤醒循环） */
+    q_fd_t       wake_r;     /* 唤醒管道读端（poll 监听）；Windows 下为回环 UDP socket(SOCKET) */
+    q_fd_t       wake_w;     /* 唤醒管道写端（跨线程唤醒循环）；Windows 下与 wake_r 同一 socket */
     volatile int stop;       /* 内部停止标志 */
     struct q_local_task *lhead, *ltail;  /* 本地任务队列（循环线程内联执行） */
     pthread_mutex_t lmtx;

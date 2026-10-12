@@ -6,14 +6,14 @@
 #include "q_net.h"
 #include "q_net_srv_int.h"
 
-void q_net_srv_accept_handler(int fd, uint32_t events, void *ctx)
+void q_net_srv_accept_handler(q_fd_t fd, uint32_t events, void *ctx)
 {
     q_net_srv_t *s = (q_net_srv_t *)ctx;
     (void)events;
     /* 一次性 accept 所有就绪连接（ET/水平均可，循环直到 EAGAIN） */
     for (;;)
     {
-        int cfd = -1;
+        q_fd_t cfd = (q_fd_t)-1;
         if (q_net_accept(fd, &cfd) != 0)
             break;              /* 无更多连接（EAGAIN 或出错） */
         if (q_net_set_nonblock(cfd) != 0)

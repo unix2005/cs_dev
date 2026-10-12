@@ -10,7 +10,7 @@ int q_net_srv_listen6(q_net_srv_t *s, int port, int backlog)
 {
     if (!s)
         return -1;
-    int lf = -1;
+    q_fd_t lf = (q_fd_t)-1;
     if (q_net_bind_listen6(port, backlog, &lf) != 0)
         return -1;
     if (q_reactor_add(s->reactor, lf, EPOLLIN, q_net_srv_accept_handler, s) != 0)

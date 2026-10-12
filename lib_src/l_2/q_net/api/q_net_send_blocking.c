@@ -5,9 +5,9 @@
 #include "headers.h"
 #include "q_net.h"
 
-ssize_t q_net_send_blocking(int fd, const void *buf, size_t len)
+ssize_t q_net_send_blocking(q_fd_t fd, const void *buf, size_t len)
 {
-    if (fd < 0 || (!buf && len))
+    if (fd == (q_fd_t)-1 || (!buf && len))
         return -1;
     size_t off = 0;
     while (off < len)

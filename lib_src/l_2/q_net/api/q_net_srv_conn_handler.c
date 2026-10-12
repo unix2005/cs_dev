@@ -9,7 +9,7 @@
 #include "q_net.h"
 #include "q_net_srv_int.h"
 
-void q_net_srv_conn_handler(int fd, uint32_t events, void *ctx)
+void q_net_srv_conn_handler(q_fd_t fd, uint32_t events, void *ctx)
 {
     q_net_srv_t *s = (q_net_srv_t *)ctx;
     (void)events;

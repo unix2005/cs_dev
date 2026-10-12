@@ -25,7 +25,7 @@ q_net_srv_t *q_net_srv_create(int nworkers)
         return NULL;
     }
     s->stop = 0;
-    s->listen_fd = -1;
+    s->listen_fd = (q_fd_t)-1;
     s->on_data = NULL;
     s->ctx = NULL;
     return s;

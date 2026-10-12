@@ -6,7 +6,7 @@
 #include "q_reactor.h"
 #include "q_evsrc_int.h"
 
-int q_evsrc_epoll_del(q_evsrc_epoll_t *e, int fd)
+int q_evsrc_epoll_del(q_evsrc_epoll_t *e, q_fd_t fd)
 {
 #ifdef __linux__
     if (!e || fd < 0)

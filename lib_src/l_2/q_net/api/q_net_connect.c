@@ -5,12 +5,12 @@
 #include "headers.h"
 #include "q_net.h"
 
-int q_net_connect(const char *host, int port, int *fd_out)
+int q_net_connect(const char *host, int port, q_fd_t *fd_out)
 {
     if (!host || port <= 0 || !fd_out)
         return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    q_fd_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == (q_fd_t)-1)
         return -1;
 
     struct sockaddr_in addr;
@@ -19,12 +19,12 @@ int q_net_connect(const char *host, int port, int *fd_out)
     addr.sin_port = htons((uint16_t)port);
     if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0)
     {
-        close(fd);
+        Q_SOCK_CLOSE(fd);
         return -1;
     }
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
-        close(fd);
+        Q_SOCK_CLOSE(fd);
         return -1;
     }
     *fd_out = fd;

@@ -16,7 +16,7 @@ static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 static char g_recvbuf[256];
 static size_t g_reclen = 0;
 
-static void on_data(int fd, void *buf, size_t len, void *ctx)
+static void on_data(q_fd_t fd, void *buf, size_t len, void *ctx)
 {
     (void)ctx;
     pthread_mutex_lock(&g_mtx);
@@ -37,18 +37,18 @@ static void *srv_thread(void *arg)
 int main(void)
 {
     /* ===== socket 基础 ===== */
-    int s = -1;
+    q_fd_t s = (q_fd_t)-1;
     CHECK(q_net_socket_tcp(&s) == 0, "socket tcp");
-    CHECK(s >= 0, "socket fd");
+    CHECK(s != (q_fd_t)-1, "socket fd");
     CHECK(q_net_set_nonblock(s) == 0, "set nonblock");
     q_net_close(s);
 
-    int lf = -1;
+    q_fd_t lf = (q_fd_t)-1;
     CHECK(q_net_bind_listen(18080, 8, &lf) == 0, "bind_listen 18080");
     q_net_close(lf);
 
     /* ===== IPv4 UDP 回环 ===== */
-    int usrv = -1, ucli = -1;
+    q_fd_t usrv = (q_fd_t)-1, ucli = (q_fd_t)-1;
     CHECK(q_net_bind(18085, &usrv) == 0, "udp bind 18085");
     CHECK(q_net_socket_udp(&ucli) == 0, "udp socket");
     struct sockaddr_storage dst; socklen_t dstlen;
@@ -62,7 +62,7 @@ int main(void)
     q_net_close(ucli); q_net_close(usrv);
 
     /* ===== IPv6 UDP 回环（::1） ===== */
-    int usrv6 = -1, ucli6 = -1;
+    q_fd_t usrv6 = (q_fd_t)-1, ucli6 = (q_fd_t)-1;
     CHECK(q_net_bind6(18086, &usrv6) == 0, "udp6 bind6 18086");
     CHECK(q_net_socket_udp6(&ucli6) == 0, "udp6 socket");
     struct sockaddr_storage dst6; socklen_t dst6len;
@@ -88,7 +88,7 @@ int main(void)
     CHECK(ss.ss_family == AF_INET6, "addr_any v6 family");
 
     /* ===== TCP 阻塞收发回环 ===== */
-    int tlf = -1, tcf = -1, taf = -1;
+    q_fd_t tlf = (q_fd_t)-1, tcf = (q_fd_t)-1, taf = (q_fd_t)-1;
     CHECK(q_net_bind_listen(18087, 8, &tlf) == 0, "tcp bind_listen 18087");
     CHECK(q_net_connect("127.0.0.1", 18087, &tcf) == 0, "tcp connect 127.0.0.1");
     CHECK(q_net_accept(tlf, &taf) == 0, "tcp accept");
@@ -100,7 +100,7 @@ int main(void)
     q_net_close(tcf); q_net_close(taf); q_net_close(tlf);
 
     /* ===== IPv6 TCP 连接/接受/阻塞收发 ===== */
-    int tlf6 = -1, tcf6 = -1, taf6 = -1;
+    q_fd_t tlf6 = (q_fd_t)-1, tcf6 = (q_fd_t)-1, taf6 = (q_fd_t)-1;
     CHECK(q_net_bind_listen6(18088, 8, &tlf6) == 0, "tcp6 bind_listen6 18088");
     CHECK(q_net_connect6("::1", 18088, &tcf6) == 0, "tcp6 connect6 ::1");
     CHECK(q_net_accept(tlf6, &taf6) == 0, "tcp6 accept");
@@ -119,7 +119,7 @@ int main(void)
     CHECK(q_net_srv_listen(srv, 18099, 8) == 0, "srv listen 18099");
     pthread_t th;
     CHECK(pthread_create(&th, NULL, srv_thread, srv) == 0, "srv thread start");
-    int cf = -1;
+    q_fd_t cf = (q_fd_t)-1;
     CHECK(q_net_connect("127.0.0.1", 18099, &cf) == 0, "srv client connect");
     const char *smsg = "hello-reactor-worker";
     CHECK(q_net_send_blocking(cf, smsg, strlen(smsg)) == (ssize_t)strlen(smsg), "srv client send");

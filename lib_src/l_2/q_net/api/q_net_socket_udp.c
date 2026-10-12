@@ -5,12 +5,12 @@
 #include "headers.h"
 #include "q_net.h"
 
-int q_net_socket_udp(int *fd_out)
+int q_net_socket_udp(q_fd_t *fd_out)
 {
     if (!fd_out)
         return -1;
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0)
+    q_fd_t fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd == (q_fd_t)-1)
         return -1;
     *fd_out = fd;
     return 0;

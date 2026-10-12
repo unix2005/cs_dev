@@ -32,8 +32,14 @@ void q_disp_destroy(q_disp_t *d)
     if (d->pool)
         q_tpool_destroy(d->pool);
 
+#ifdef Q_SYS_WINDOWS
+    /* Windows 唤醒通道为单一自回环 socket（wake_r == wake_w），关闭一次即可 */
+    if (d->wake_r >= 0)
+        closesocket((SOCKET)d->wake_r);
+#else
     close(d->wake_r);
     close(d->wake_w);
+#endif
     pthread_mutex_destroy(&d->lmtx);
     free(d);
 }

@@ -5,12 +5,12 @@
 #include "headers.h"
 #include "q_net.h"
 
-int q_net_socket_tcp6(int *fd_out)
+int q_net_socket_tcp6(q_fd_t *fd_out)
 {
     if (!fd_out)
         return -1;
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (fd < 0)
+    q_fd_t fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd == (q_fd_t)-1)
         return -1;
     int one = 1;
     setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));

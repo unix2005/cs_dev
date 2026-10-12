@@ -6,10 +6,10 @@
 #include "headers.h"
 #include "q_net.h"
 
-ssize_t q_net_udp_recv(int fd, void *buf, size_t cap,
+ssize_t q_net_udp_recv(q_fd_t fd, void *buf, size_t cap,
                        struct sockaddr *from, socklen_t *fromlen)
 {
-    if (fd < 0 || !buf || cap == 0)
+    if (fd == (q_fd_t)-1 || !buf || cap == 0)
         return -1;
     return recvfrom(fd, buf, cap, 0, from, fromlen);
 }

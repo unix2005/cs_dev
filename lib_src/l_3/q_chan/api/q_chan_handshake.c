@@ -12,7 +12,7 @@
 #include "q_chan_int.h"
 
 /* 以 2 字节大端长度 + DER 发送对端公钥 */
-static int send_pub(int fd, const uint8_t *der, size_t len)
+static int send_pub(q_fd_t fd, const uint8_t *der, size_t len)
 {
     uint8_t lb[2] = {(uint8_t)((len >> 8) & 0xff), (uint8_t)(len & 0xff)};
     if (q_net_send_blocking(fd, lb, 2) != 2)
@@ -23,7 +23,7 @@ static int send_pub(int fd, const uint8_t *der, size_t len)
 }
 
 /* 读取 2 字节大端长度 + DER，调用方负责 free */
-static uint8_t *recv_pub(int fd, size_t *out_len)
+static uint8_t *recv_pub(q_fd_t fd, size_t *out_len)
 {
     uint8_t lb[2];
     if (q_net_recv_blocking(fd, lb, 2) != 2)
@@ -41,7 +41,7 @@ static uint8_t *recv_pub(int fd, size_t *out_len)
     return der;
 }
 
-int q_chan_handshake(q_chan_t *c, int fd)
+int q_chan_handshake(q_chan_t *c, q_fd_t fd)
 {
     if (!c || c->established)
         return -1;

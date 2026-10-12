@@ -95,10 +95,17 @@ int main(void)
     size_t ctlen = 0;
     CHECK(q_crypto_sm4_gcm_encrypt(key, 16, iv, 12, aad, 8, (const uint8_t *)pt, ptlen, ct, tag, &ctlen) == 0, "gcm encrypt");
     CHECK(ctlen == ptlen, "gcm ctlen == ptlen");
+    printf("ct[%d]: ", ctlen);
+    for (size_t i = 0; i < ctlen; i++)
+    {
+        printf("%02x", ct[i]);
+    }
+    printf("\n");
     uint8_t dec[64];
     size_t declen = 0;
     CHECK(q_crypto_sm4_gcm_decrypt(key, 16, iv, 12, aad, 8, ct, ctlen, tag, dec, &declen) == 0, "gcm decrypt");
     CHECK(declen == ptlen && memcmp(dec, pt, ptlen) == 0, "gcm roundtrip");
+    printf("dec[%d]: %s\n", declen, dec);
     uint8_t ct2[64];
     memcpy(ct2, ct, ctlen);
     ct2[0] ^= 0xff;

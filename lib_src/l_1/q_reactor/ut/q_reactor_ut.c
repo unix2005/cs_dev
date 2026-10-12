@@ -59,7 +59,7 @@ static void local_fn(void *arg)
 #ifdef __linux__
 /* ---- D) 兼容旧行为：定时器 + reactor ---- */
 static int g_hits = 0;
-static void timer_h(int fd, uint32_t events, void *ctx)
+static void timer_h(q_fd_t fd, uint32_t events, void *ctx)
 {
     uint64_t v = 0;
     (void)events;
@@ -88,7 +88,7 @@ static void work_fn(void *arg)
     g_work++;
     pthread_mutex_unlock(&g_mtx);
 }
-static void timer_dispatch_h(int fd, uint32_t events, void *ctx)
+static void timer_dispatch_h(q_fd_t fd, uint32_t events, void *ctx)
 {
     uint64_t v = 0;
     (void)events;
@@ -132,7 +132,7 @@ int main(void)
 
 #ifdef __linux__
     /* D1) reactor + 定时器（旧行为保留） */
-    int tfd = -1;
+    q_fd_t tfd = -1;
     CHECK(q_reactor_timer_create(&tfd) == 0, "timer create");
     CHECK(q_reactor_timer_arm(tfd, 50, 100) == 0, "timer arm 50/100");
     q_reactor_t *r = q_reactor_create();
@@ -165,7 +165,7 @@ int main(void)
 
     /* D4) 集成：reactor 事件 -> 派发到 worker 池 */
     g_work = 0;
-    int tfd2 = -1;
+    q_fd_t tfd2 = -1;
     q_reactor_timer_create(&tfd2);
     q_reactor_timer_arm(tfd2, 30, 60);
     q_reactor_t *r2 = q_reactor_create();

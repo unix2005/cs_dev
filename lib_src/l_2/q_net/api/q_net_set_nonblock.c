@@ -5,9 +5,9 @@
 #include "headers.h"
 #include "q_net.h"
 
-int q_net_set_nonblock(int fd)
+int q_net_set_nonblock(q_fd_t fd)
 {
-    if (fd < 0)
+    if (fd == (q_fd_t)-1)
         return -1;
     int fl = fcntl(fd, F_GETFL, 0);
     if (fl < 0)

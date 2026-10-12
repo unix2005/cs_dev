@@ -6,7 +6,7 @@
 #include "q_chan.h"
 #include "q_chan_int.h"
 
-int q_chan_receive(q_chan_t *c, int fd, uint8_t *plain, size_t plaincap, size_t *plainlen, uint16_t *cmd_out)
+int q_chan_receive(q_chan_t *c, q_fd_t fd, uint8_t *plain, size_t plaincap, size_t *plainlen, uint16_t *cmd_out)
 {
     if (!c || !c->established)
         return -1;

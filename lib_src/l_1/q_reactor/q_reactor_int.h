@@ -9,8 +9,9 @@
 
 struct q_reactor
 {
-    q_disp_t          *disp;   /* 通用任务分发核心（拥有循环驱动与唤醒机制） */
-    q_evsrc_epoll_t   *ep;     /* 挂载到 disp 的 epoll 事件源插件（由 disp 负责销毁） */
+    q_disp_t   *disp;   /* 通用任务分发核心（拥有循环驱动与唤醒机制） */
+    q_evsrc_t  *src;    /* 选定的事件源插件（epoll/kqueue/poll），base.priv 指向具体后端结构；
+                           由 disp 负责销毁（经 base.destroy） */
 };
 
 #endif /* Q_REACTOR_INT_H */
