@@ -31,7 +31,7 @@ include ../../../include/Makefile.inc
 # 注：Makefile.inc 的 lib_so 配方把 LIB_LDFLAGS 放在 OBJS 之前，而 ld 默认
 # --as-needed 会在库尚未被引用时丢弃它，导致 libxml2 不进入 NEEDED。
 # 故用 --no-as-needed 强制记录，链接结束再恢复 --as-needed，保证 .so 自包含。
-LIB_LDFLAGS += -Wl,--no-as-needed -lxml2 -Wl,--as-needed
+#LIB_LDFLAGS += -Wl,--no-as-needed -lxml2 -Wl,--as-needed
 
 # 对外头文件归集到 include/
 

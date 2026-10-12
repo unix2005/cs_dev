@@ -41,7 +41,11 @@
 #include <sys/timerfd.h>
 #include <sys/un.h>
 #elif defined(Q_SYS_MACOS)
+#include <sys/un.h>
 #include <libkern/OSByteOrder.h>
+#include <sys/event.h>
+#define EPOLLIN  EVFILT_READ
+#define EPOLLOUT EVFILT_WRITE
 #define htobe16(x) OSSwapHostToBigInt16(x)
 #define htobe32(x) OSSwapHostToBigInt32(x)
 #define htobe64(x) OSSwapHostToBigInt64(x)
