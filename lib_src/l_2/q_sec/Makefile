@@ -19,8 +19,6 @@ LIBS    += -lqcrypto -lqrand -lqmem -lqutil -lqlog
 
 include ../../../include/Makefile.inc
 
-install_hdr:
-	cp -f q_sec.h $(INCLUDE)/q_sec.h
 
 all: lib_static lib_so install_lib install_hdr
 

@@ -38,8 +38,6 @@ include ../../../include/Makefile.inc
 # q_net -> q_reactor 使用 pthread（libqreactor.so 未记录 NEEDED libpthread），按需加入
 LIBS    += $(LIB_PTHREAD)
 
-install_hdr:
-	cp -f q_chan.h $(INCLUDE)/q_chan.h
 
 all: lib_static lib_so install_lib install_hdr
 

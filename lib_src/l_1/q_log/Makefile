@@ -31,8 +31,6 @@ include ../../../include/Makefile.inc
 # 注：Tongsuo 只允许 lib_src/l_1/q_crypto 调用，本库不直接计算 SM3 链式哈希。
 
 # 对外头文件归集到 include/（include 目录由项目初始化时创建，此处不再建子目录）
-install_hdr:
-	cp -f q_log.h $(INCLUDE)/q_log.h
 
 # 扩展默认 all：仅追加先决条件（无配方体，不触发“覆盖配方”告警）
 all: lib_static lib_so install_lib install_hdr

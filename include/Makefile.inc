@@ -58,6 +58,10 @@ LIB_CRYPTO    = -lssl -lcrypto
 # FFMPEG_HOME ?= $(SOFT_HOME)/open_src/ffmpeg
 # LIB_FFMPEG  = -lavformat -lavcodec -lavutil -lswscale
 
+# seccomp（守护进程沙箱收敛 syscall）；当前仅 lib_src/l_1/q_common 预留，
+# 待 q_common 真正实现 seccomp 后由该库 LIBS += $(LIB_SECCOMP) 链接
+LIB_SECCOMP   = -lseccomp
+
 # 基础系统库（按需）：不全局强制链接，需要它们的可执行程序/库自行 LIBS += 对应变量
 LIB_PTHREAD = -lpthread
 LIB_M       = -lm
@@ -159,8 +163,18 @@ else
 all: lib_static lib_so install_lib install_hdr
 endif
 
+# 安装目录产物清理：依据 BUILD 区分 lib(产物在 lib/ + 头在 include/) 与 bin(产物在 bin/)
+# 注意：不能用 [ -n "$(TARGET_SO)" ] 判定——bin 模块 TARGET 无 .a 后缀，
+#       $(TARGET:.a=.so) 不替换，TARGET_SO 仍非空，会误判成库模块。
+ifeq ($(BUILD),bin)
 clean:
 	rm -rf *.o *.a *.so *.dylib *.exe core *.log $(TARGET) api/*.o ut/bin
+	rm -f $(BIN)/$(TARGET)
+else
+clean:
+	rm -rf *.o *.a *.so *.dylib *.exe core *.log $(TARGET) api/*.o ut/bin
+	rm -f $(LIB)/$(TARGET) $(LIB)/$(TARGET_SO) $(INCLUDE)/$(HEADER)
+endif
 
 # 编译静态库（ar 仅归档 .o，不参与链接，故不需要 -l）
 lib_static: $(OBJS)

@@ -5,12 +5,10 @@
  *      持有 DB 凭据。入站数据均来自 netd 经 q_ipc 转发的可信 TLV，
  *      但仍需按 q_codec 字段校验表做结构校验，绝不信任原始字节。
  *
- * 骨架：主循环 + 降权占位（逻辑与公共件见 ../../common）。
+ * 骨架：主循环 + 降权占位（逻辑与公共件见 libqcommon / q_common.h）。
  */
-#include <stdio.h>
-#include <unistd.h>
-#include "daemon_signal.h"
-#include "daemon_harden.h"
+#include "include_stdio.h"
+#include "q_common.h"
 
 int main(void)
 {

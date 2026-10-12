@@ -20,8 +20,6 @@ LIBS    += -lqutil -lqlog
 
 include ../../../include/Makefile.inc
 
-install_hdr:
-	cp -f q_ipc.h $(INCLUDE)/q_ipc.h
 
 all: lib_static lib_so install_lib install_hdr
 

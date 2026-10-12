@@ -16,8 +16,6 @@ LIBS += $(SOFT_HOME)/tongsuo/lib64
 
 include ../../../include/Makefile.inc
 
-install_hdr:
-	cp -f q_spa.h $(INCLUDE)/q_spa.h
 
 all: lib_static lib_so install_lib install_hdr
 

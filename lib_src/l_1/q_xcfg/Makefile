@@ -34,8 +34,6 @@ include ../../../include/Makefile.inc
 LIB_LDFLAGS += -Wl,--no-as-needed -lxml2 -Wl,--as-needed
 
 # 对外头文件归集到 include/
-install_hdr:
-	cp -f q_xcfg.h $(INCLUDE)/q_xcfg.h
 
 # 扩展默认 all：仅追加先决条件（无配方体，不触发"覆盖配方"告警）
 all: lib_static lib_so install_lib install_hdr

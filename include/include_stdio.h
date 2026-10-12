@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <errno.h>              /* 错误号：所有系统调用/IO 错误处理统一经此 */
 #include <limits.h>
+#include <signal.h>             /* 信号：sigaction / sig_atomic_t（守护进程信号处理） */
 
 // 跨平台文件、IO兼容
 #ifdef Q_SYS_WINDOWS

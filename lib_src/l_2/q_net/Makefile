@@ -43,8 +43,6 @@ LIBS    += -lqutil -lqlog -lqmem -lqreactor $(LIB_PTHREAD)
 
 include ../../../include/Makefile.inc
 
-install_hdr:
-	cp -f q_net.h $(INCLUDE)/q_net.h
 
 all: lib_static lib_so install_lib install_hdr
 

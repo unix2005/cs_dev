@@ -17,8 +17,6 @@ OBJS   = api/q_codec_pkt_hdr_pack.o \
 include ../../../include/Makefile.inc
 
 # 对外头文件归集到 include/
-install_hdr:
-	cp -f q_codec.h $(INCLUDE)/q_codec.h
 
 # 扩展默认 all：仅追加先决条件（无配方体）
 all: lib_static lib_so install_lib install_hdr

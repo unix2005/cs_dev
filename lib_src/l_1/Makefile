@@ -12,6 +12,7 @@ fundmental_lib:
 	(cd q_rand; make)
 	(cd q_crypto; make)
 	(cd q_reactor; make)
+	(cd q_common; make)
 	@echo
 	@echo "    Make fundmental library success !!!"
 
@@ -24,5 +25,6 @@ clean:
 	(cd q_rand; make clean)
 	(cd q_crypto; make clean)
 	(cd q_reactor; make clean)
+	(cd q_common; make clean)
 	@echo
 	@echo "    Clean fundmental library compiled file okey ..."

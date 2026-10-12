@@ -31,8 +31,8 @@ include ../../../include/Makefile.inc
 LIBS += $(SOFT_HOME)/tongsuo/lib64 
 
 # 对外头文件归集到 include/
-install_hdr:
-	cp -f q_crypto.h $(INCLUDE)/q_crypto.h
+#install_hdr:
+#	cp -f q_crypto.h $(INCLUDE)/q_crypto.h
 
 # 扩展默认 all：仅追加先决条件（无配方体，不触发"覆盖配方"告警）
 all: lib_static lib_so install_lib install_hdr

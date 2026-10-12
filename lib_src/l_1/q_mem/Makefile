@@ -32,8 +32,6 @@ include ../../../include/Makefile.inc
 #           不依赖任何其它 q_* 库，故 LIBS 保持默认空（不追加 -lq*）
 
 # 对外头文件归集到 include/（include 目录由项目初始化时创建，此处不再建子目录）
-install_hdr:
-	cp -f q_mem.h $(INCLUDE)/q_mem.h
 
 # 扩展默认 all：仅追加先决条件（无配方体，不触发“覆盖配方”告警）
 all: lib_static lib_so install_lib install_hdr

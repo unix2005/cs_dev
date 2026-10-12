@@ -6,12 +6,10 @@
  * 安全基线：非 root + chroot + seccomp；无 DB 凭据、无文件写权限。
  *
  * 骨架：主循环 + 降权/沙箱占位（逻辑后续填充）。重复样板已抽至
- *       ../../common（daemon_signal / daemon_harden）。
+ *       libqcommon（q_common.h：daemon_signal / daemon_harden）。
  */
-#include <stdio.h>
-#include <unistd.h>
-#include "daemon_signal.h"
-#include "daemon_harden.h"
+#include "include_stdio.h"
+#include "q_common.h"
 
 int main(void)
 {

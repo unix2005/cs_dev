@@ -26,8 +26,6 @@ include ../../../include/Makefile.inc
 # 分层依赖：l_1 基础层，零项目内依赖（不追加 -lq*），仅依赖 libc（/dev/urandom）
 
 # 对外头文件归集到 include/
-install_hdr:
-	cp -f q_rand.h $(INCLUDE)/q_rand.h
 
 # 扩展默认 all：仅追加先决条件（无配方体，不触发"覆盖配方"告警）
 all: lib_static lib_so install_lib install_hdr

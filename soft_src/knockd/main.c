@@ -8,12 +8,10 @@
  * 安全基线：代码量 < 500 行，可逐行审查；是首个接触攻击者的代码，
  *         须配 seccomp 严格收敛 syscall，并纳入 AFL++/libFuzzer 7x24 零崩溃验证。
  *
- * 骨架：主循环 + 降权占位（逻辑与公共件见 ../../common）。
+ * 骨架：主循环 + 降权占位（逻辑与公共件见 libqcommon / q_common.h）。
  */
-#include <stdio.h>
-#include <unistd.h>
-#include "daemon_signal.h"
-#include "daemon_harden.h"
+#include "include_stdio.h"
+#include "q_common.h"
 
 int main(void)
 {
