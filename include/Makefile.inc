@@ -120,7 +120,8 @@ LDFLAGS     = -L$(LIB) -L$(SOFT_LIB) -L$(EXT_LIB) \
 
 # 目标名（各模块 Makefile 覆盖，如 TARGET = libqlog.a）
 TARGET ?= libapp.a
-# 动态库名（默认由静态库名推导，模块可显式覆盖，如 TARGET_SO = libqlog.so）
+# 动态库名（默认由静态库名推导；平台扩展名：Linux=.so / macOS=.dylib / Windows=.dll，
+# 各平台分支已覆盖，模块亦可显式覆盖，如 TARGET_SO = libqlog.so）
 TARGET_SO ?= $(TARGET:.a=.so)
 
 # 模块公共头文件名（与 shell/build.sh 头文件归集保持一致：模块目录名 + .h）
@@ -237,8 +238,11 @@ format-check:
 ifeq ($(shell uname -s),Darwin)
 CFLAGS  += -D_Q_SYS_MACOS
 LDFLAGS += -undefined dynamic_lookup
+# macOS 动态库扩展名为 .dylib（非 Linux 的 .so）
+TARGET_SO = $(TARGET:.a=.dylib)
 # macOS ld64 用 -undefined dynamic_lookup 允许动态库保留未决符号（等价于 GNU 的 --allow-shlib-undefined）
-LIB_LDFLAGS = -L$(LIB) -Wl,-rpath,$(LIB) -undefined dynamic_lookup
+# -install_name @rpath/$(TARGET_SO) 使消费方经自身 RUNPATH 解析本库（等价于 GNU 的 soname + RUNPATH）
+LIB_LDFLAGS = -L$(LIB) -Wl,-rpath,$(LIB) -undefined dynamic_lookup -Wl,-install_name,@rpath/$(TARGET_SO)
 endif
 
 # Linux 兼容适配
@@ -256,4 +260,6 @@ ifdef WIN32
 CFLAGS  += -D_Q_SYS_WINDOWS
 LDFLAGS := $(filter-out -fPIE -pie,$(LDFLAGS))
 SOFLAGS := -shared
+# Windows 动态库扩展名为 .dll
+TARGET_SO = $(TARGET:.a=.dll)
 endif
