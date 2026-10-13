@@ -32,8 +32,8 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #pragma comment(lib, "ws2_32.lib")
-// 统一socket关闭接口
-#define Q_SOCK_CLOSE(fd) closesocket(fd)
+// 统一socket关闭接口（Windows 下 SOCKET 为 64 位，显式转回 SOCKET 避免 Win32 截断告警）
+#define Q_SOCK_CLOSE(fd) closesocket((SOCKET)(fd))
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -77,7 +77,7 @@
  * sock_fd：Linux/mac是int fd；Windows是SOCKET类型
  * enable: 1=开启非阻塞，0=关闭
  */
-static inline int Q_FD_SET_NONBLOCK(int sock_fd, int enable)
+static inline int Q_FD_SET_NONBLOCK(q_fd_t sock_fd, int enable)
 {
 #if defined(Q_SYS_WINDOWS)
     u_long mode = enable ? 1 : 0;

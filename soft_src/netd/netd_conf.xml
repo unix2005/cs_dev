@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  netd 配置文件（协议进程，公网 TCP）
+  部署路径：/etc/gtkvms/netd_conf.xml
+  启动方式：q_service_netd -c /abs/path/netd_conf.xml
+  路径优先级：启动参数 -c  >  环境变量 GTKVMS_NETD_CONF  >  默认值
+  注：密钥对需离线生成后放置到 sm2_priv_file / sm2_pub_file 指定路径；
+      公钥须内置于客户端，用于握手时校验服务端身份（防中间人）。
+-->
+<config>
+    <netd>
+        <!-- TCP 监听端口（公网业务端口；默认被防火墙 filtered，需 knockd SPA 敲门放行） -->
+        <listen_port>18099</listen_port>
+
+        <!-- accept 队列长度 -->
+        <backlog>64</backlog>
+
+        <!-- worker 线程数（每连接独占一个 worker，跑阻塞式握手与收发） -->
+        <nworkers>8</nworkers>
+
+        <!-- 线程池任务队列上限（有界；满则拒绝新连接，防 DoS） -->
+        <max_queue>1024</max_queue>
+
+        <!-- reactor 轮询超时（毫秒） -->
+        <poll_timeout_ms>200</poll_timeout_ms>
+
+        <!-- 密钥标识（写入包头 key_id，与客户端内置公钥版本对应） -->
+        <key_id>1</key_id>
+
+        <!-- 转发 bizd 的 Unix Socket 路径（须与 bizd 监听路径一致） -->
+        <ipc_path>/var/run/gtkvms/bizd.sock</ipc_path>
+
+        <!-- 服务端 SM2 长期密钥对（DER） -->
+        <sm2_priv_file>/etc/gtkvms/netd_sm2.priv</sm2_priv_file>
+        <sm2_pub_file>/etc/gtkvms/netd_sm2.pub</sm2_pub_file>
+
+        <!-- 日志：log_file 为空则仅输出到控制台(stderr) -->
+        <log_file>/var/log/gtkvms/netd.log</log_file>
+        <log_level>info</log_level>
+        <log_console>1</log_console>
+        <log_max_size>10485760</log_max_size>
+
+        <!-- 是否监听 IPv6（一期默认关闭） -->
+        <enable_ipv6>0</enable_ipv6>
+    </netd>
+</config>

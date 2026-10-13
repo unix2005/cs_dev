@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  bizd 配置文件（业务进程，仅 Unix Socket，不对外暴露公网）
+  部署路径：/etc/gtkvms/bizd_conf.xml
+  启动方式：q_service_bizd -c /abs/path/bizd_conf.xml
+  路径优先级：启动参数 -c  >  环境变量 GTKVMS_BIZD_CONF  >  默认值
+
+  说明：bizd 是【路由转发】进程——接收 netd 的可信 TLV 请求，
+        转为 JSON 后经 TCP 下发给具体干活的微服务（在另一项目实现），
+        再把微服务的 JSON 响应回传 netd。DB 客户端亦在下游微服务侧，
+        故本进程不持有 DB 凭据。
+-->
+<config>
+    <bizd>
+        <!-- UDS 监听路径（须与 netd 侧 ipc_path 一致） -->
+        <ipc_path>/var/run/gtkvms/bizd.sock</ipc_path>
+
+        <!-- accept 队列长度 -->
+        <backlog>64</backlog>
+
+        <!-- worker 线程数 -->
+        <nworkers>8</nworkers>
+
+        <!-- 线程池任务队列上限（有界；满则拒绝新连接，防 DoS） -->
+        <max_queue>1024</max_queue>
+
+        <!-- reactor 轮询超时（毫秒） -->
+        <poll_timeout_ms>200</poll_timeout_ms>
+
+        <!-- ===== 下游微服务端点（另一项目实现，TCP + JSON） ===== -->
+        <ep_hello>
+            <host>127.0.0.1</host>
+            <port>9001</port>
+        </ep_hello>
+
+        <!-- LOGIN / HEARTBEAT / LOGOUT 会话相关 -->
+        <ep_auth>
+            <host>127.0.0.1</host>
+            <port>9002</port>
+        </ep_auth>
+
+        <!-- BIZ_QUERY / BIZ_UPDATE 业务数据 -->
+        <ep_biz>
+            <host>127.0.0.1</host>
+            <port>9003</port>
+        </ep_biz>
+
+        <!-- VIDEO_OPEN 视频调度 -->
+        <ep_video>
+            <host>127.0.0.1</host>
+            <port>9004</port>
+        </ep_video>
+
+        <!-- ===== 日志 ===== -->
+        <log_file>/var/log/gtkvms/bizd.log</log_file>
+        <log_level>info</log_level>
+        <log_console>1</log_console>
+        <log_max_size>10485760</log_max_size>
+    </bizd>
+</config>

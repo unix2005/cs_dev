@@ -10,16 +10,18 @@
 
 BUILD   = bin
 TARGET  = q_service_netd
-OBJS    = main.o
+OBJS    = main.o netd_config.o netd_util.o netd_limit.o \
+         netd_ipc.o netd_handler.o netd_srv.o
 
 # —— 分层依赖：本项目库静态链接(.a)，运行期不依赖 libq*.so；
 #    外部库(pthread / Tongsuo)仅在最终可执行程序链接期引入 ——
 QLIBS  = $(call ld_group, \
-         $(LIB)/libqcommon.a $(LIB)/libqreactor.a $(LIB)/libqnet.a \
-         $(LIB)/libqchan.a $(LIB)/libqsec.a $(LIB)/libqcodec.a \
-         $(LIB)/libqipc.a $(LIB)/libqcrypto.a $(LIB)/libqrand.a \
-         $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
-LIBS   = $(QLIBS) $(LIB_PTHREAD) -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64
+         $(LIB)/libqcommon.a $(LIB)/libqreactor.a $(LIB)/libqxcfg.a \
+         $(LIB)/libqnet.a $(LIB)/libqchan.a $(LIB)/libqsec.a \
+         $(LIB)/libqcodec.a $(LIB)/libqipc.a $(LIB)/libqcrypto.a \
+         $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
+# 注：q_xcfg 依赖系统 libxml2（与 knockd 一致）；pthread 供 reactor 线程池
+LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64
 # 注：seccomp 待 q_common 真正实现后，本处追加 $(LIB_SECCOMP)
 
 include ../../include/Makefile.inc

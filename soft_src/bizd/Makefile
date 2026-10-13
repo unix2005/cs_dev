@@ -10,15 +10,21 @@
 
 BUILD   = bin
 TARGET  = q_service_bizd
-OBJS    = main.o
+OBJS    = main.o bizd_config.o bizd_util.o \
+         bizd_route.o bizd_handler.o bizd_srv.o
 
 # —— 分层依赖：本项目库静态链接(.a)，运行期不依赖 libq*.so；
-#    外部库(pthread / Tongsuo)仅在最终可执行程序链接期引入 ——
+#    外部库(pthread / Tongsuo / libxml2 / cJSON)仅在最终可执行程序链接期引入 ——
 QLIBS  = $(call ld_group, \
-         $(LIB)/libqcommon.a $(LIB)/libqreactor.a \
-         $(LIB)/libqipc.a $(LIB)/libqcodec.a $(LIB)/libqcrypto.a \
+         $(LIB)/libqcommon.a $(LIB)/libqreactor.a $(LIB)/libqxcfg.a \
+         $(LIB)/libqipc.a $(LIB)/libqcodec.a $(LIB)/libqchan.a \
+         $(LIB)/libqsec.a $(LIB)/libqcrypto.a \
          $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
-LIBS   = $(QLIBS) $(LIB_PTHREAD) -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64
+# 系统 libxml2（q_xcfg 依赖）；cJSON 为本地 vendored（$(SOFT_HOME)/cJSON）
+LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 \
+         -I$(SOFT_HOME)/cJSON/include \
+         -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64 \
+         -L$(SOFT_HOME)/cJSON/lib -lcjson -Wl,-rpath,$(SOFT_HOME)/cJSON/lib
 # 注：DB 客户端库待接入后在此追加；seccomp 待实现后追加 $(LIB_SECCOMP)
 
 include ../../include/Makefile.inc

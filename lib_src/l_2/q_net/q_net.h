@@ -15,7 +15,6 @@
 #define L_2_Q_NET_H
 
 #include "include_stdio.h"
-#include <stdint.h>               /* 标准整数类型，公开头直接包含（无平台差异） */
 #include "include_net.h"          /* 跨平台聚合：socket/epoll/netinet/arpa/inet 等；提供 q_fd_t */
 
 #ifdef __cplusplus

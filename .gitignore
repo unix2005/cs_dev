@@ -46,6 +46,7 @@ minimal_svc_shared
 # 开源软件
 open_src/
 tongsuo/
+cJSON/
 soft_src/macos_vms_v1/macos_vms_v1
 bin/q_service_knockd
 bin/q_service_bizd
