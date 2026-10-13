@@ -4,23 +4,29 @@
 
 int daemon_harden(const struct daemon_harden_cfg *cfg)
 {
-    if (cfg == NULL) {
+    if (cfg == NULL)
+    {
         return -1;
     }
 
-    if (cfg->chroot_dir != NULL) {
+    if (cfg->chroot_dir != NULL)
+    {
         /* TODO: 正式实现应先绑定挂载最小根文件系统再 chroot，避免信息泄露 */
-        if (chroot(cfg->chroot_dir) != 0) {
+        if (chroot(cfg->chroot_dir) != 0)
+        {
             return -1;
         }
-        if (chdir("/") != 0) {
+        if (chdir("/") != 0)
+        {
             return -1;
         }
     }
 
-    if (cfg->drop_uid >= 0) {
+    if (cfg->drop_uid >= 0)
+    {
         /* TODO: 建议先 setgroups/setgid 再 setuid，防止权限残留 */
-        if (setuid((uid_t)cfg->drop_uid) != 0) {
+        if (setuid((uid_t)cfg->drop_uid) != 0)
+        {
             return -1;
         }
     }

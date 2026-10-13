@@ -31,7 +31,7 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
 
 - **soft\_src/**：项目核心业务源代码目录，所有自研业务源码必须存放于此，**按进程隔离架构划分固定子目录**：
 
-    - **knockd/**：SPA 单包授权进程（UDP 包校验 + nftables 动态放行），代码量严格控制在 **500 行以内**，仅授予 `CAP_NET_ADMIN`
+    - **knockd/**：SPA 单包授权进程（UDP 包校验 + nftables 动态放行，libnftables 直连、IPv4/IPv6 双栈监听），代码量严格控制在 **500 行以内**，仅授予 `CAP_NET_ADMIN`
     - **netd/**：协议进程（SM2 密钥协商、SM4\-GCM 解包、字段校验、限流），公网暴露，**非 root + chroot + seccomp，无 DB 凭据、无文件写权限**
     - **bizd/**：业务进程（业务逻辑、数据库、权限、审计、视频流调度），持有 DB 凭据，**仅监听 Unix Socket，不直接暴露公网**
     - **client/**：GTK4 客户端业务代码（UI 与纯C通信内核解耦，UI 操作只允许主线程）
@@ -220,6 +220,7 @@ include ../../../include/Makefile.inc     # 或 include ${SOFT_HOME}/include/Mak
 - 提供 `shell/check_layer.sh` 静态扫描：解析所有 `#include` 与本模块 Makefile 的 `-lq*` 列表，上报「l\_N 引用了 l\_M（M > N）」、同层互引、库名含下划线、以及 Makefile 中缺失的下层依赖，作为 CI 必过项
 - **代码格式化统一用 clangd / clang-format**：工程根目录已提供 `.clang-format`（样式：4 空格缩进、Allman 花括号、指针靠右、保留 `#include` 顺序）与 `.clangd`（声明 `-Iinclude` 等自定义头路径，使 clangd 无需 `compile_commands.json` 即可解析）；编辑器由 clangd 按 `.clang-format` 自动格式化，命令行用 `make format`（本模块就地重写）/ `make format-check`（CI 检查，不匹配则非零退出）
 - **soft_src 可执行程序链接约定（项目库静态链入、外部库仅 exe 期引入）**：soft_src/* 的 Makefile 将本项目全部 `q_*` 库以 `-Wl,--start-group $(LIB)/libq*.a -Wl,--end-group` **静态链入可执行文件**（运行期不依赖 `libq*.so`，彻底规避 RUNPATH / 传递依赖问题）；依赖闭包在 `QLIBS` 中显式全列（高级在前、低级在后），与 `lib_static/lib_so` 不消费 `$(LIBS)` 的约定一致；外部依赖（`$(LIB_PTHREAD)`、Tongsuo）**只在最终 exe 链接期引入**：`-L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64`
+- **knockd 防火墙放行与监听约束（禁止 shell、必须 IPv6 双栈）**：knockd 在 SPA 校验通过后把源 IP 加入 nftables 放行集合，**严禁 `system()` / `popen()` 调外部 `nft` 命令**（存在 shell 注入面与 fork+sh 开销），**必须直连 libnftables**：`nft_ctx_new()` 建上下文 + `nft_run_cmd_from_buffer()` 经 netlink 下发 `add element <table> <set> { <ip> timeout <ttl>s }`，进程退出时 `nft_ctx_free()`；运行时库 `libnftables.so.1` 随 nftables 安装，目标机若未装 `libnftables-dev`（无 `libnftables.so` 链接名）则本地提供最小 API 声明头、并以 `-l:libnftables.so.1` 链接具体 SONAME。监听须 **IPv4/IPv6 双栈**：分别建 `AF_INET` 与 `AF_INET6`（置 `IPV6_V6ONLY=1`，避免 v4 映射地址误入 ipv4_addr 集合）两个 UDP socket，按地址族写入 `allow4`（type ipv4_addr）/ `allow6`（type ipv6_addr）两个集合，由 reactor 回调 `ctx` 区分；`on_knock` 用 `sockaddr_storage` + `inet_ntop(AF_INET/AF_INET6)` 统一文本化源 IP；IPv6 socket 创建失败须降级为仅 IPv4（不致命，仅记 WARN）。部署前置：`nft add table inet spa` + 两个集合（`timeout;`），进程以 `CAP_NET_ADMIN` 运行。
 
 ## 四、AI 编译 \& 构建约束
 

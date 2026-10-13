@@ -12,10 +12,11 @@
 #include "include_stdio.h"
 
 /* 降权/沙箱配置（由调用方构造，传指针给 daemon_harden） */
-struct daemon_harden_cfg {
-    const char *chroot_dir;     /* NULL = 不 chroot */
-    int         drop_uid;       /* -1 = 不降权；否则切换到该 uid（建议专用非特权用户） */
-    int         seccomp_profile;/* 0 = 不启用；非 0 = 按服务选择 seccomp profile（待实现） */
+struct daemon_harden_cfg
+{
+    const char *chroot_dir; /* NULL = 不 chroot */
+    int drop_uid;           /* -1 = 不降权；否则切换到该 uid（建议专用非特权用户） */
+    int seccomp_profile;    /* 0 = 不启用；非 0 = 按服务选择 seccomp profile（待实现） */
 };
 
 /* 安装 SIGTERM/SIGINT 处理，置全局停止标志。成功 0，失败 -1。 */

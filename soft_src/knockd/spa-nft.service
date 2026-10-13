@@ -1,0 +1,12 @@
+[Unit]
+Description=Load SPA nftables rules for knockd
+After=network.target nftables.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/nftables/spa.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+

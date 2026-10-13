@@ -8,7 +8,11 @@ OBJS   = main.o
 BUILD  = bin
 SOFT_INCL = .
 
-# q_spa 传递依赖：q_crypto 国密基于 Tongsuo，最终链接须带上 $(LIB_CRYPTO)
-LIBS += -lqspa -lqcrypto -lqrand -lqmem -lqlog $(LIB_CRYPTO)
+# q_spa 传递依赖：q_crypto 国密基于 Tongsuo；
+# 本项目 q_* 库一律静态链入（避免依赖动态 libqcrypto.so 缺失 Tongsuo 符号），
+# Tongsuo 仅在最终 exe 链接期引入（与 knockd 同约定）。
+QLIBS = $(call ld_group, \
+        $(LIB)/libqspa.a $(LIB)/libqcrypto.a $(LIB)/libqrand.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
+LIBS  = $(QLIBS) -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64
 
 include ../../../include/Makefile.inc

@@ -14,14 +14,17 @@ int daemon_install_signal_handlers(void)
 {
     struct sigaction sa;
     sa.sa_handler = q_common_on_signal;
-    if (sigemptyset(&sa.sa_mask) != 0) {
+    if (sigemptyset(&sa.sa_mask) != 0)
+    {
         return -1;
     }
     sa.sa_flags = 0;
-    if (sigaction(SIGTERM, &sa, NULL) != 0) {
+    if (sigaction(SIGTERM, &sa, NULL) != 0)
+    {
         return -1;
     }
-    if (sigaction(SIGINT, &sa, NULL) != 0) {
+    if (sigaction(SIGINT, &sa, NULL) != 0)
+    {
         return -1;
     }
     return 0;

@@ -1,0 +1,18 @@
+table inet spa {
+    set allow4 {
+        type ipv4_addr
+        flags dynamic, timeout
+    }
+    set allow6 {
+        type ipv6_addr
+        flags dynamic, timeout
+    }
+
+    chain input_netd {
+        type filter hook input priority 0;
+        tcp dport 9000 ip saddr @allow4 accept
+        tcp dport 9000 ip6 saddr @allow6 accept
+        tcp dport 9000 drop
+    }
+}
+
