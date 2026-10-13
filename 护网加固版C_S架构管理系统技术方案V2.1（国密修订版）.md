@@ -113,6 +113,24 @@ bin|lib|dll/  产物（严格平台分离）
 
 因此**不需要跨平台 poller**，只需 `lib_src/net/sock.h` 约 80 行兼容封装（`WSAStartup`、`closesocket`、`ioctlsocket`、`getaddrinfo`）。
 
+**跨平台 socket 封装（已落地）**：服务端部署目标为 Linux，但底层库按跨平台实现，
+以便开发机（macOS / Windows）可直接编译调试：
+
+- 统一句柄类型 `q_fd_t`：POSIX = `int`；Windows = `uint64_t`（原样承载 64 位 `SOCKET`）。
+- 统一关闭接口 `Q_SOCK_CLOSE(fd)`：Windows 展开为 `closesocket((SOCKET)(fd))`，
+  显式强转以消除 Win32 下的截断告警。
+- 统一非阻塞接口 `Q_FD_SET_NONBLOCK(sock_fd, enable)`：
+  POSIX 走 `fcntl(F_GETFL/F_SETFL, O_NONBLOCK)`；Windows 走 `ioctlsocket(FIONBIO)`。
+  **形参已由 `int` 修正为 `q_fd_t`** —— 原实现在 Win64 上会先把 64 位句柄截断为 `int`，
+  再于宏内强转回 `SOCKET`，导致高位丢失。
+- `q_net_close` / `q_net_set_nonblock` 均已改为复用上述封装，不再直接依赖 POSIX 的
+  `close` / `fcntl`。
+
+**平台可用性实测**：`q_reactor` 按平台选择后端（Linux=epoll、macOS/BSD=kqueue、
+Windows=WSAPoll），故在 macOS 开发机上 `q_reactor_create()` 可正常返回
+（与早期 knockd 注释中"仅 epoll"的描述已不一致，以当前代码为准）。
+`netd` / `bizd` 均已在 macOS 完成启动与监听冒烟；生产仍按 Linux 部署。
+
 ### 2.2 epoll reactor（服务端）
 
 ```c
