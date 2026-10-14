@@ -19,6 +19,7 @@
 // 依赖项目基础公共头文件
 #include "include_stdio.h"
 #include "include_time.h"
+#include "cJSON.h"
 
 // 预留第三方XML库引入入口
 // 示例：#include <tinyxml2.h>

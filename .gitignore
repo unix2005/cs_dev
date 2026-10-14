@@ -51,3 +51,9 @@ soft_src/macos_vms_v1/macos_vms_v1
 bin/q_service_knockd
 bin/q_service_bizd
 bin/q_service_netd
+lib/libcjson_utils.so.1
+lib/libcjson_utils.so.1.7.19
+lib/libcjson.so.1.7.19
+lib/libcjson.so.1
+include/cJSON_Utils.h
+include/cJSON.h
