@@ -15,6 +15,7 @@
 #define L_2_Q_NET_H
 
 #include "include_stdio.h"
+#include <stdint.h>               /* 标准整数类型，公开头直接包含（无平台差异） */
 #include "include_net.h"          /* 跨平台聚合：socket/epoll/netinet/arpa/inet 等；提供 q_fd_t */
 
 #ifdef __cplusplus
@@ -53,6 +54,11 @@ extern "C" {
                            struct sockaddr_storage *ss, socklen_t *len);
     /* 生成通配绑定地址；v6!=0 用 IN6ADDR_ANY 否则 INADDR_ANY；成功 0，失败 -1 */
     int q_net_addr_any(int v6, int port, struct sockaddr_storage *ss, socklen_t *len);
+    /* 把端点（地址族 + 地址指针 + 端口）格式化为 "ip:port"（端口为本机序；IPv6 用 [ip]:port）；
+       返回 buf；buf==NULL 或缓冲不足（需 >= INET6_ADDRSTRLEN+8）或地址族未知时回传 "?"。
+       addr 指向 4 字节(v4)或 16 字节(v6)地址；调用方保证长度与 fam 匹配。 */
+    const char *q_net_addr_ntop(int fam, const void *addr, uint16_t port,
+                                char *buf, size_t buflen);
 
     /* ===================== 客户端阻塞收发（TCP，循环至完成/EOR/错误） ===================== */
     /* 完整发送 len 字节（处理短写/EINTR）；返回已发送字节数，出错 -1 */

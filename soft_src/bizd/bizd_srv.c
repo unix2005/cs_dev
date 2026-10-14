@@ -67,19 +67,19 @@ static int parse_req(const uint8_t *buf, size_t len, bizd_conn_t *c)
 void bizd_conn_worker(void *arg)
 {
     bizd_conn_t *c   = (bizd_conn_t *)arg;
-    bizd_udata_t ud;
     uint8_t     *req = NULL, *resp = NULL;
     size_t       reqlen = 0u;
+    char         ep[INET6_ADDRSTRLEN + 8];   /* 客户端真实源 IP（来自 netd IPC，无端口） */
 
     req  = (uint8_t *)malloc(Q_IPC_MAXMSG);
     resp = (uint8_t *)malloc(Q_IPC_MAXMSG);
     if (!req || !resp)
-        goto cleanup;
+        goto cleanup;   /* 内存不足属服务级故障，尚不知客户端身份 */
 
     (void)bizd_set_io_timeout(c->fd, BIZD_IO_TIMEOUT_SEC);
 
     if (bizd_recv_frame(c->fd, req, Q_IPC_MAXMSG, &reqlen) != 0)
-        goto cleanup;
+        goto cleanup;   /* 收帧失败：尚未解析出客户端 IP，无法标识具体连接 */
 
     if (parse_req(req, reqlen, c) != 0)
     {
@@ -88,14 +88,13 @@ void bizd_conn_worker(void *arg)
         size_t  n = 0u;
         bizd_put_be32(rb, (uint32_t)Q_IPC_R_BADREQ);
         if (q_codec_tlv_encode(resp, Q_IPC_MAXMSG, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
-        {
             (void)bizd_send_frame(c->fd, resp, n);
-        }
+        QLOG_WARN(c->g->log, "请求解析失败 src=%s（回 BADREQ）",
+                  bizd_conn_ntop(c, ep, sizeof(ep)));
         goto cleanup;
     }
 
-    ud.g = c->g;
-    ud.c = c;
+    bizd_conn_ntop(c, ep, sizeof(ep));   /* 客户端 IP 已解析，固定用于后续日志 */
 
     /* 分发到下游微服务：out 中已是外层 TLV(RESULT)+TLV(BODY) */
     {
@@ -104,6 +103,13 @@ void bizd_conn_worker(void *arg)
                                resp, Q_IPC_MAXMSG, &outlen) == 0 && outlen > 0u)
         {
             (void)bizd_send_frame(c->fd, resp, outlen);
+            QLOG_DEBUG(c->g->log, "请求处理完成 src=%s cmd=%u",
+                       ep, (unsigned)c->cmd);
+        }
+        else
+        {
+            QLOG_WARN(c->g->log, "指令分发失败 src=%s cmd=%u",
+                      ep, (unsigned)c->cmd);
         }
     }
 
@@ -141,6 +147,7 @@ void bizd_on_accept(q_fd_t fd, uint32_t events, void *ctx)
         if (q_tpool_dispatch(g->pool, bizd_conn_worker, c) != 0)
         {
             /* 队列满：拒绝新连接，停止本轮 accept 避免雪崩 */
+            QLOG_WARN(g->log, "线程池队列满，拒绝新 UDS 连接（停止本轮 accept）");
             q_ipc_close(cfd, NULL);
             free(c);
             break;

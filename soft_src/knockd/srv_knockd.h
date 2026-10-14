@@ -17,16 +17,12 @@ extern "C" {
 
 #include "q_common.h"
 #include "q_reactor.h"
+#include <q_net.h>               /* l_2 通用网络库：q_net_addr_ntop 端点格式化（ip:port） */
 #include "q_spa.h"
 #include <q_xcfg.h>             /* l_1 XML 配置库 */
 #include <q_log.h>              /* l_1 结构化日志 / 审计库 */
 #include <q_crypto.h>            /* l_1 国密：SM3 链式哈希（审计防篡改） */
 #include "nft_min.h"             /* 本地最小 libnftables API（直连 netlink，无 fork/sh） */
-#include <seccomp.h>             /* P0 seccomp 沙箱（libseccomp 高层 API） */
-
-#ifndef AF_NETLINK               /* 限定 socket 地址族时用到；部分头未暴露则兜底 */
-#define AF_NETLINK 16
-#endif
 
 #define KNOCKD_PORT 5001       /* listen_port 默认值 */
 #define SPA_KEY_PATH "/etc/gtkvms/spa.key" /* spa_key_file 默认值 */
@@ -61,8 +57,6 @@ typedef struct
 {
     const char *set;          /* 指向 g_cfg 中的集合名（运行期填充） */
 } knock_ctx_t;
-
-int knockd_install_seccomp(q_log_t *log);
 
 #ifdef __cplusplus
 }

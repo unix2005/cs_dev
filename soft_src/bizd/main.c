@@ -115,7 +115,7 @@ int main(int argc, char **argv)
     memset(&hc, 0, sizeof(hc));
     hc.chroot_dir      = NULL;   /* bizd 需访问 DB / UDS，不做 chroot */
     hc.drop_uid        = -1;         /* TODO: 生产部署改为专用非特权用户 bizd 的 uid */
-    hc.seccomp_profile = 2;      /* bizd：收口 DB / Unix-Socket / 文件读写 */
+    hc.seccomp_profile = 2;      /* bizd：仅记录，daemon_harden 不据此装沙箱 */
     if (daemon_harden(&hc) != 0)
     {
         QLOG_FATAL(g_bizd.log, "降权/沙箱生效失败");
@@ -123,6 +123,12 @@ int main(int argc, char **argv)
     }
 
     QLOG_INFO(g_bizd.log, "进入事件循环");
+    /* seccomp 沙箱：资源就绪后、事件循环前安装。bizd 多线程 + Unix-Socket IPC +
+       下游 TCP 转发；实现位于共享库 libqcommon 的 daemon_seccomp_apply，profile=2=bizd。
+       注：bizd profile 尚未 strace 画像，默认不安装；置 BIZD_SECCOMP=log|kill
+       才真正装载，先 log 采集被拦 syscall 再切 kill（fail-closed）。 */
+    (void)daemon_seccomp_apply(SECCOMP_PROFILE_BIZD);
+
     while (!daemon_should_stop())
     {
         (void)q_reactor_run(g_bizd.reactor, g_bcfg.poll_ms);

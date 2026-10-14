@@ -79,7 +79,7 @@ static int hnd_biz(uint16_t cmd, const uint8_t *body, size_t body_len,
     if (!u || !u->g || !u->c)
         return -1;
 
-    if (ipc_forward(u->g, u->c->src_ip, cmd, body, body_len,
+    if (ipc_forward(u->g, &u->c->src_addr, cmd, body, body_len,
                     u->c->channel_id, u->c->token.user_id,
                     &result, out, outcap, out_len) != 0)
     {
@@ -153,7 +153,7 @@ int do_login(netd_conn_t *c, const uint8_t *body, size_t blen,
 
     login_bind_ids(c, body, blen);
 
-    if (ipc_forward(c->g, c->src_ip, Q_CHAN_CMD_LOGIN, body, blen,
+    if (ipc_forward(c->g, &c->src_addr, Q_CHAN_CMD_LOGIN, body, blen,
                     c->channel_id, c->token.user_id,
                     &result, out, outcap, out_len) != 0)
     {
@@ -173,9 +173,10 @@ int do_login(netd_conn_t *c, const uint8_t *body, size_t blen,
     if (result != Q_IPC_R_OK)
         return 0;
 
-    /* 签发会话 Token，绑定 channel_id + user_id + device_id + src_ip（§6.3） */
+    /* 签发会话 Token，绑定 channel_id + user_id + device_id + src_ip（§6.3）。
+       token.src_ip 仍为 uint32 IPv4（§6.4 约定；IPv6 客户端此处记 0）。 */
     if (q_chan_token_issue(c->channel_id, c->token.user_id, c->token.device_id,
-                           c->src_ip, NETD_TOKEN_TTL_SEC, &c->token) != 0)
+                           netd_addr_v4(&c->src_addr), NETD_TOKEN_TTL_SEC, &c->token) != 0)
         return 0;
 
     c->has_token = 1;

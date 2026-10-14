@@ -31,8 +31,10 @@ int daemon_harden(const struct daemon_harden_cfg *cfg)
         }
     }
 
-    /* TODO: 按 cfg->seccomp_profile 应用 libseccomp 收敛 syscall；
-     *       实现后本库 Makefile 追加 LIBS += $(LIB_SECCOMP)（-lseccomp）。 */
+    /* seccomp 已由独立的【晚期】函数 daemon_seccomp_apply(cfg->seccomp_profile)
+     * 实现（见 q_common_seccomp.c），由各守护进程在资源就绪后、事件循环前调用。
+     * 注意：绝不能在此处（资源创建之前）安装 seccomp，否则会拦死自身的
+     * socket()/bind()/pthread_create() 等 setup 动作。故此处保持 no-op。 */
     (void)cfg->seccomp_profile;
 
     return 0;

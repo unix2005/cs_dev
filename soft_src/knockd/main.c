@@ -169,26 +169,46 @@ static void on_knock(int fd, uint32_t events, void *ctx)
     if (n != (ssize_t)sizeof(q_spa_pkt_t))
         return;
 
-    /* 源 IP 文本化（v4/v6 统一），用于日志与 nft 元素；不信任报文内 ip_hint，防 IP 欺骗 */
-    char ip[INET6_ADDRSTRLEN];
+    /* 源端点（v4/v6 统一）：
+       - ep（"ip:port"，端口转本机序）供日志/审计，与本项目其它守护进程一致，
+         由通用 q_net_addr_ntop 格式化；
+       - ip_only（纯 IP）专供 nft 放行集合元素（集合类型为 ipv4_addr/ipv6_addr，不含端口）。
+       地址取自 recvfrom 的真实源（不信任报文内 ip_hint，防 IP 欺骗）。 */
+    char ep[INET6_ADDRSTRLEN + 8];
+    char ip_only[INET6_ADDRSTRLEN];
+    const void *ap;
+    uint16_t sport_host;
     if (src.ss_family == AF_INET)
-        inet_ntop(AF_INET, &((const struct sockaddr_in *)&src)->sin_addr, ip, sizeof(ip));
+    {
+        const struct sockaddr_in *a4 = (const struct sockaddr_in *)&src;
+        inet_ntop(AF_INET, &a4->sin_addr, ip_only, sizeof(ip_only));
+        ap = &a4->sin_addr;
+        sport_host = ntohs(a4->sin_port);
+    }
     else if (src.ss_family == AF_INET6)
-        inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)&src)->sin6_addr, ip, sizeof(ip));
+    {
+        const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)&src;
+        inet_ntop(AF_INET6, &a6->sin6_addr, ip_only, sizeof(ip_only));
+        ap = &a6->sin6_addr;
+        sport_host = ntohs(a6->sin6_port);
+    }
     else
+    {
         return;  /* 非 IP 地址族，忽略 */
+    }
+    q_net_addr_ntop((int)src.ss_family, ap, sport_host, ep, sizeof(ep));
 
     uint16_t port = 0, ttl = 0;
     if (q_spa_verify(g_spa_key, SPA_KEY_LEN, (const q_spa_pkt_t *)buf, (uint64_t)time(NULL), &port, &ttl) != 0)
     {
         /* 校验失败：网络层静默丢弃、不回包（抗扫描）；
            本地仅记 DEBUG，避免被扫描/伪造流量刷爆日志（需排障时把 log_level 调为 debug） */
-        QLOG_DEBUG(g_log, "SPA 校验失败 from=%s len=%zd", ip, n);
+        QLOG_DEBUG(g_log, "SPA 校验失败 from=%s len=%zd", ep, n);
         return;
     }
 
     unsigned ttl_s = ttl ? ttl : KNOCKD_TTL_DEF;
-    open_door(kc->set, ip, ttl_s);
+    open_door(kc->set, ip_only, ttl_s);
 
     /* 成功授权是安全关键事件，必须留审计痕迹（始终记录，不受级别过滤） */
     char uidhex[65];
@@ -197,7 +217,7 @@ static void on_knock(int fd, uint32_t events, void *ctx)
     uint8_t dig[32];
     char cur_hex[65];
     spa_uid_hex(((const q_spa_pkt_t *)buf)->user_id, uidhex);
-    snprintf(amsg, sizeof(amsg), "remote=%s ttl=%u uid=%s", ip, ttl_s, uidhex);
+    snprintf(amsg, sizeof(amsg), "remote=%s ttl=%u uid=%s", ep, ttl_s, uidhex);
 
     /* SM3 链式哈希（防篡改）：cur = SM3(prev || "SPA" || "open_ok" || msg) */
     int cl = snprintf(chain, sizeof(chain), "%s|SPA|open_ok|%s", g_audit_prev, amsg);
@@ -331,11 +351,12 @@ int main(int argc, char *argv[])
 
     /* 降权占位（Linux 生效；chroot 不适用 knockd，需 nftables 操作）。
        注意：daemon_harden 当前仅做 chroot/setuid（均为 no-op），seccomp 沙箱
-       见下方 knockd_install_seccomp()，必须在资源就绪后、事件循环前安装。 */
+       见下方 daemon_seccomp_apply(SECCOMP_PROFILE_KNOCKD)，由共享库 libqcommon
+       提供，在资源就绪后、事件循环前安装。 */
     static const struct daemon_harden_cfg hc = {
         .chroot_dir = NULL,
-        .drop_uid = -1,       /* TODO: 仍降为非 root，仅保留 CAP_NET_ADMIN */
-        .seccomp_profile = 0, /* 沙箱改由 knockd_install_seccomp() 统一收敛 */
+        .drop_uid = -1,              /* TODO: 仍降为非 root，仅保留 CAP_NET_ADMIN */
+        .seccomp_profile = SECCOMP_PROFILE_KNOCKD, /* 仅记录，daemon_harden 不据此装沙箱 */
     };
     daemon_harden(&hc);
 
@@ -381,8 +402,9 @@ int main(int argc, char *argv[])
 
     /* 进入事件循环前安装 seccomp 沙箱（此时 socket/reactor/log 均已就绪；
        首包才会懒加载 libnftables 上下文走 Netlink，已在允许列表内）。
+       沙箱实现位于共享库 libqcommon（daemon_seccomp_apply，profile=3=knockd）。
        安装失败仅记日志、不阻断服务（纵深防御失败也应尽量可用）。 */
-    knockd_install_seccomp(g_log);
+    (void)daemon_seccomp_apply(SECCOMP_PROFILE_KNOCKD);
 
     /* 事件循环：收到 SIGINT/SIGTERM 后 daemon_should_stop() 置位即退出 */
     while (!daemon_should_stop())

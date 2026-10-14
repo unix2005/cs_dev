@@ -87,6 +87,34 @@ int main(void)
     CHECK(q_net_addr_any(1, 9999, &ss, &slen) == 0, "addr_any v6");
     CHECK(ss.ss_family == AF_INET6, "addr_any v6 family");
 
+    /* ===== 地址格式化 q_net_addr_ntop（v4/v6/异常入参） ===== */
+    {
+        char buf[INET6_ADDRSTRLEN + 8];
+        uint8_t v4[4]     = {192, 168, 1, 100};
+        uint8_t v6_1[16]  = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+        uint8_t v6_db8[16]= {0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,0x01};
+
+        CHECK(strcmp(q_net_addr_ntop(AF_INET, v4, 80, buf, sizeof(buf)),
+                     "192.168.1.100:80") == 0, "ntop v4 ip:port");
+        CHECK(strcmp(q_net_addr_ntop(AF_INET6, v6_1, 5678, buf, sizeof(buf)),
+                     "[::1]:5678") == 0, "ntop v6 ::1 ip:port");
+        CHECK(strcmp(q_net_addr_ntop(AF_INET6, v6_db8, 443, buf, sizeof(buf)),
+                     "[2001:db8::1]:443") == 0, "ntop v6 2001:db8::1 ip:port");
+
+        /* 异常入参：缓冲不足 / buf 为 NULL -> 统一回传 "?"（不越界写） */
+        CHECK(strcmp(q_net_addr_ntop(AF_INET, v4, 80, buf, 4), "?") == 0, "ntop 缓冲不足 -> ?");
+        CHECK(strcmp(q_net_addr_ntop(AF_INET, v4, 80, NULL, 0), "?") == 0, "ntop buf=NULL -> ?");
+
+        /* 异常入参：addr 为 NULL / 未知地址族 -> "?:port"（保留端口便于排查） */
+        CHECK(strcmp(q_net_addr_ntop(AF_INET, NULL, 9999, buf, sizeof(buf)),
+                     "?:9999") == 0, "ntop addr=NULL -> ?:port");
+        CHECK(strcmp(q_net_addr_ntop(999, v4, 9999, buf, sizeof(buf)),
+                     "?:9999") == 0, "ntop 未知族 -> ?:port");
+
+        /* 正常路径返回传入 buf（便于内联打印 / 链式调用） */
+        CHECK(q_net_addr_ntop(AF_INET, v4, 80, buf, sizeof(buf)) == buf, "ntop 返回 buf");
+    }
+
     /* ===== TCP 阻塞收发回环 ===== */
     q_fd_t tlf = (q_fd_t)-1, tcf = (q_fd_t)-1, taf = (q_fd_t)-1;
     CHECK(q_net_bind_listen(18087, 8, &tlf) == 0, "tcp bind_listen 18087");

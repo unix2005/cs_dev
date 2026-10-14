@@ -25,11 +25,12 @@ static int ipc_read_exact(int fd, uint8_t *buf, size_t len)
 /* 请求：  [len:4][TLV(CMD)][TLV(BODY)][TLV(SRC_IP)][TLV(CHANID)][TLV(USERID)] */
 static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
                             const uint8_t *body, size_t blen,
-                            uint32_t src_ip, const uint8_t chanid[32],
+                            const netd_addr_t *src, const uint8_t chanid[32],
                             const uint8_t userid[32])
 {
     size_t off = Q_IPC_LENPFX, n = 0u;
     uint8_t u16[2], ipb[4];
+    uint32_t v4 = netd_addr_v4(src);     /* wire SRC_IP 仍是 uint32 IPv4（§6.4） */
 
     put_be16(u16, cmd);
     if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_CMD, u16, 2, &n) == 0)
@@ -42,7 +43,7 @@ static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
             off += n;
     }
 
-    memcpy(ipb, &src_ip, 4);   /* 保持网络序字节序 */
+    memcpy(ipb, &v4, 4);   /* 保持网络序字节序 */
     if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_SRCIP, ipb, 4, &n) == 0)
         off += n;
 
@@ -62,7 +63,7 @@ static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
  * 把已认证的业务请求转发给 bizd，并取回响应。
  * 返回 0 成功（*result 为 bizd 结果码）；非 0 表示本层无法完成转发。
  */
-int ipc_forward(netd_ctx_t *g, uint32_t src_ip, uint16_t cmd,
+int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
                 const uint8_t *body, size_t blen,
                 const uint8_t chanid[32], const uint8_t userid[32],
                 uint32_t *result, uint8_t *out, size_t outcap, size_t *out_len)
@@ -90,7 +91,7 @@ int ipc_forward(netd_ctx_t *g, uint32_t src_ip, uint16_t cmd,
         return -1;
     }
 
-    reqlen = ipc_build_req(req, sizeof(req), cmd, body, blen, src_ip,
+    reqlen = ipc_build_req(req, sizeof(req), cmd, body, blen, src,
                            chanid, userid);
 
     if (q_ipc_connect(g_cfg.ipc_path, &fd) != 0)

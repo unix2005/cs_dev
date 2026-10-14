@@ -96,15 +96,35 @@ typedef struct
     int      log_console;
     uint64_t log_max_size;
     int      enable_ipv6;
+    char     chroot_dir[256]; /* chroot jail 目录（空=不 chroot；生产建议 /var/empty/netd） */
+    char     drop_user[64];   /* 降权目标用户名（空=不降权；生产建议专用非特权用户 netd） */
 } netd_cfg_t;
 
 typedef struct netd_ctx netd_ctx_t;
+
+/* 源 IP 统一键：v4/v6 共用，作为【IP 维度限流】的哈希/比较键。
+   v4: fam=AF_INET, b[0..3]=网络序地址；v6: fam=AF_INET6, b[0..15]=全 16 字节。
+   wire 侧（q_chan_token_t.src_ip / IPC SRC_IP TLV）仍为 uint32 IPv4（§6.4 约定），
+   故另提供 netd_addr_v4() 取出网络序 v4 值（v6 时返回 0，保持旧语义）。 */
+typedef struct
+{
+    sa_family_t fam;     /* AF_INET / AF_INET6；0 = 未初始化/空槽 */
+    uint8_t     b[16];   /* 地址字节（v4 仅前 4 字节有效） */
+} netd_addr_t;
+
+static inline uint32_t netd_addr_v4(const netd_addr_t *a)
+{
+    if (a->fam != AF_INET)
+        return 0u;
+    return ((uint32_t)a->b[0] << 24) | ((uint32_t)a->b[1] << 16) |
+           ((uint32_t)a->b[2] << 8) | (uint32_t)a->b[3];
+}
 
 /* 每连接上下文：由 accept 循环分配，worker 线程独占（无需加锁） */
 typedef struct
 {
     q_fd_t         fd;
-    uint32_t       src_ip;    /* 网络序 IPv4（IPv6 记为 0，见 TODO） */
+    netd_addr_t    src_addr;   /* 源 IP（v4/v6 统一限流键；见 netd_addr_t） */
     uint16_t       src_port;
     q_chan_st_t    st;
     uint8_t        channel_id[32];
@@ -115,6 +135,17 @@ typedef struct
     size_t         bytes;     /* 未认证阶段字节计数 */
     netd_ctx_t    *g;
 } netd_conn_t;
+
+/* 把连接端点格式化为 "ip:port"（port 转本机序打印），供日志标识具体连接。
+   薄封装：复用 l_2/q_net 的通用 q_net_addr_ntop（不绑 netd 类型，便于其它守护进程复用）。
+   返回 buf；c==NULL 或缓冲不足（需 >= INET6_ADDRSTRLEN+8）时回传 "?"。 */
+static inline const char *netd_conn_ntop(const netd_conn_t *c, char *buf, size_t buflen)
+{
+    if (!c || buflen < INET6_ADDRSTRLEN + 8)
+        return "?";
+    return q_net_addr_ntop((int)c->src_addr.fam, c->src_addr.b,
+                           ntohs(c->src_port), buf, buflen);
+}
 
 struct netd_ctx
 {
@@ -136,7 +167,7 @@ struct netd_ctx
 #define NETD_IPTAB 1024u
 typedef struct
 {
-    uint32_t           ip;         /* 网络序；0 = 空槽 */
+    netd_addr_t        addr;       /* 源 IP 键（fam=0 表示空槽） */
     int                conns;      /* 当前并发连接数 */
     q_sec_rate_limit_t *rl_new;    /* 新建速率 NETD_PERIP_NEW / 1s */
     q_sec_rate_limit_t *rl_fail;   /* 登录失败 NETD_PERIP_FAIL / 300s */
@@ -166,12 +197,12 @@ void     put_be32(uint8_t *p, uint32_t v);
 int      netd_set_io_timeout(q_fd_t fd, int sec);
 
 /* ===================== 限流（netd_limit.c） ===================== */
-int  conn_acquire(netd_ctx_t *g, uint32_t src_ip);
-void conn_release(netd_ctx_t *g, uint32_t src_ip);
-void fail_note(netd_ctx_t *g, uint32_t src_ip);
+int  conn_acquire(netd_ctx_t *g, const netd_addr_t *src);
+void conn_release(netd_ctx_t *g, const netd_addr_t *src);
+void fail_note(netd_ctx_t *g, const netd_addr_t *src);
 
 /* ===================== IPC 转发（netd_ipc.c） ===================== */
-int ipc_forward(netd_ctx_t *g, uint32_t src_ip, uint16_t cmd,
+int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
                 const uint8_t *body, size_t blen,
                 const uint8_t chanid[32], const uint8_t userid[32],
                 uint32_t *result, uint8_t *out, size_t outcap, size_t *out_len);

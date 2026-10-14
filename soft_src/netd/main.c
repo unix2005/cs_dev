@@ -30,6 +30,8 @@
  *   netd_srv.c     accept 回调 + 每连接 worker 会话
  */
 #include "srv_netd.h"
+#include <pwd.h>
+#include <sys/types.h>          /* getpwnam / uid_t */
 
 netd_ctx_t g_netd;
 
@@ -163,11 +165,22 @@ int main(int argc, char **argv)
         QLOG_WARN(g_netd.log, "IPv6 监听 fd 注册 reactor 失败");
     }
 
-    /* 降权沙箱：所有资源就绪后、进入事件循环前 */
+    /* 降权沙箱：所有资源就绪后、进入事件循环前。
+       chroot / drop 由配置驱动（默认空 = 不启用，便于开发/测试）。
+       注意：启用 chroot 后，与 bizd 的 Unix Socket（/var/run/gtkvms/bizd.sock）
+       在 jail 内不可见，生产部署须将该 socket 目录 bind-mount 进 chroot_dir。 */
     memset(&hc, 0, sizeof(hc));
-    hc.chroot_dir      = NULL;   /* TODO: 生产部署置 /var/empty/netd */
-    hc.drop_uid        = -1;      /* TODO: 生产部署改为专用非特权用户 netd 的 uid */
-    hc.seccomp_profile = 1;       /* netd：收口不可信网络输入解析 */
+    hc.chroot_dir = g_cfg.chroot_dir[0] ? g_cfg.chroot_dir : NULL;
+    hc.drop_uid   = -1;
+    if (g_cfg.drop_user[0])
+    {
+        struct passwd *pw = getpwnam(g_cfg.drop_user);
+        if (pw)
+            hc.drop_uid = (int)pw->pw_uid;
+        else
+            QLOG_WARN(g_netd.log, "drop_user '%s' 不存在，维持当前身份运行", g_cfg.drop_user);
+    }
+    hc.seccomp_profile = SECCOMP_PROFILE_NETD;  /* netd：仅记录，daemon_harden 不据此装沙箱 */
     if (daemon_harden(&hc) != 0)
     {
         QLOG_FATAL(g_netd.log, "降权/沙箱生效失败");
@@ -175,6 +188,10 @@ int main(int argc, char **argv)
     }
 
     QLOG_INFO(g_netd.log, "进入事件循环");
+    /* seccomp 沙箱：资源就绪后、事件循环前安装（netd 多线程须放行 clone；
+       实现位于共享库 libqcommon daemon_seccomp_apply，profile=1=netd）。 */
+    (void)daemon_seccomp_apply(SECCOMP_PROFILE_NETD);
+
     while (!daemon_should_stop())
     {
         (void)q_reactor_run(g_netd.reactor, g_cfg.poll_ms);

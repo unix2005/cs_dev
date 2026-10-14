@@ -7,20 +7,24 @@
 #    q_common(信号/降权) q_spa q_crypto q_rand q_util q_mem q_log
 #  注：knockd 为单线程 recvfrom 循环，暂不需要 pthread；
 #      nftables 直连用系统 libnftables.so.1（netlink，无 nft 命令行依赖）；
-#      seccomp 沙箱已启用：链接 -lseccomp（libseccomp 高层 API，main.c 内收敛 syscall）
+#      seccomp 沙箱已移入共享库 libqcommon（daemon_seccomp_apply，profile=3=knockd），
+#      链接 -lseccomp 由该库符号拉取（libseccomp 高层 API，收敛 syscall）
 # ==============================================
 
 BUILD   = bin
 TARGET  = q_service_knockd
-OBJS    = seccomp_pub.o main.o
+OBJS    = main.o
 
 # —— 分层依赖：本项目库静态链接(.a)，运行期不依赖 libq*.so；
 #    外部库(pthread / Tongsuo)仅在最终可执行程序链接期引入 ——
 QLIBS  = $(call ld_group, \
          $(LIB)/libqcommon.a $(LIB)/libqreactor.a $(LIB)/libqxcfg.a $(LIB)/libqspa.a $(LIB)/libqcrypto.a \
-         $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
+         $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a \
+         $(LIB)/libqnet.a)
 # 系统 libnftables.so.1（netlink 直连内核，无需 nft 命令）；用 -l: 形式链接具体 SONAME
 # （目标机未装 libnftables-dev，无 libq... 链接名）。运行期由 ldconfig 解析。
+# seccomp 沙箱已移入 libqcommon（daemon_seccomp_apply）；-lseccomp 由该库符号拉取，
+# 此处保留以确保链接期解析（libqcommon.a 引用 libseccomp）。
 LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64 -l:libnftables.so.1 -lseccomp
 
 include ../../include/Makefile.inc

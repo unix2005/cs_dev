@@ -42,5 +42,12 @@
 
         <!-- 是否监听 IPv6（一期默认关闭） -->
         <enable_ipv6>0</enable_ipv6>
+
+        <!-- 降权沙箱（生产建议启用；空 = 不启用，便于开发/测试） -->
+        <!-- chroot jail 目录；启用后须将 bizd 的 Unix Socket 目录 bind-mount 进该目录，
+             否则 netd 无法连接 bizd（详见 main.c 注释） -->
+        <chroot_dir></chroot_dir>
+        <!-- 降权目标用户名（须为存在的专用非特权用户）；空 = 不降权 -->
+        <drop_user></drop_user>
     </netd>
 </config>

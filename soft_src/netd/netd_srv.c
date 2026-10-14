@@ -17,6 +17,7 @@ void conn_worker(void *arg)
     q_chan_disp_t *disp = NULL;
     q_chan_t      *ch = NULL;
     uint8_t       *plain = NULL, *resp = NULL;
+    char           ep[INET6_ADDRSTRLEN + 8];   /* 连接端点 "ip:port"，用于日志定位 */
 
     plain = (uint8_t *)malloc(NETD_PLAIN_MAX);
     resp  = (uint8_t *)malloc(NETD_RESP_MAX);
@@ -40,26 +41,27 @@ void conn_worker(void *arg)
                        g->sm2_pub, g->sm2_pub_len, NULL, 0, NETD_SEQ0, g->key_id);
     if (!ch)
     {
-        QLOG_DEBUG(g->log, "通道创建失败");
+        QLOG_DEBUG(g->log, "通道创建失败 src=%s", netd_conn_ntop(c, ep, sizeof(ep)));
         goto cleanup;
     }
     if (q_chan_handshake(ch, c->fd) != 0)
     {
-        QLOG_DEBUG(g->log, "握手失败");
+        QLOG_DEBUG(g->log, "握手失败 src=%s", netd_conn_ntop(c, ep, sizeof(ep)));
         goto cleanup;
     }
     if (q_chan_binding(ch, c->channel_id) != 0)
     {
-        QLOG_DEBUG(g->log, "通道绑定失败");
+        QLOG_DEBUG(g->log, "通道绑定失败 src=%s", netd_conn_ntop(c, ep, sizeof(ep)));
         goto cleanup;
     }
-    /* 握手成功后由调用方置 KEYED（q_chan.h 约定） */
+    /* q_chan.h 约定：握手成功后须由本函数（q_chan_handshake 的调用方）把连接态推进到 KEYED */
     if (q_chan_sm_transition(&c->st, Q_CHAN_EV_HANDSHAKE_OK) != 0)
     {
-        QLOG_DEBUG(g->log, "状态迁移失败 NEW->KEYED");
+        QLOG_DEBUG(g->log, "状态迁移失败 NEW->KEYED src=%s",
+                   netd_conn_ntop(c, ep, sizeof(ep)));
         goto cleanup;
     }
-    QLOG_INFO(g->log, "通道就绪 src_ip=%u", (unsigned)c->src_ip);
+    QLOG_INFO(g->log, "通道就绪 src=%s", netd_conn_ntop(c, ep, sizeof(ep)));
 
     /* ---- 2. 收包循环：阻塞式整帧收发 + 状态 / 配额校验 ---- */
     while (!daemon_should_stop())
@@ -79,7 +81,8 @@ void conn_worker(void *arg)
             if (c->pkts > NETD_UNAUTH_PKTS || c->bytes > NETD_UNAUTH_BYTES ||
                 (time_t)now_sec() - c->accept_ts > (time_t)NETD_UNAUTH_SEC)
             {
-                QLOG_DEBUG(g->log, "未认证配额超限，断连");
+                QLOG_DEBUG(g->log, "未认证配额超限，断连 src=%s",
+                           netd_conn_ntop(c, ep, sizeof(ep)));
                 break;
             }
         }
@@ -87,7 +90,8 @@ void conn_worker(void *arg)
         /* 先按白名单裁决，非法指令直接断连（§5.3） */
         if (q_chan_sm_cmd_allowed(c->st, cmd) != 1)
         {
-            QLOG_DEBUG(g->log, "指令 %u 在当前状态非法，断连", (unsigned)cmd);
+            QLOG_DEBUG(g->log, "指令 %u 在当前状态非法，断连 src=%s",
+                       (unsigned)cmd, netd_conn_ntop(c, ep, sizeof(ep)));
             break;
         }
 
@@ -96,12 +100,13 @@ void conn_worker(void *arg)
         {
             login_ok = do_login(c, plain, plainlen, resp, NETD_RESP_MAX, &outlen);
             if (!login_ok)
-                fail_note(g, c->src_ip);   /* 计入 IP 维度登录失败配额（§6.4） */
+                fail_note(g, &c->src_addr);   /* 计入 IP 维度登录失败配额（§6.4） */
         }
 
         if (q_chan_sm_on_cmd(&c->st, cmd, login_ok) != 0)
         {
-            QLOG_DEBUG(g->log, "指令 %u 状态迁移失败，断连", (unsigned)cmd);
+            QLOG_DEBUG(g->log, "指令 %u 状态迁移失败，断连 src=%s",
+                       (unsigned)cmd, netd_conn_ntop(c, ep, sizeof(ep)));
             break;
         }
 
@@ -111,7 +116,8 @@ void conn_worker(void *arg)
             if (q_chan_disp_invoke(disp, cmd, plain, plainlen, resp,
                                    NETD_RESP_MAX, &outlen) != 0)
             {
-                QLOG_DEBUG(g->log, "指令 %u 处理失败", (unsigned)cmd);
+                QLOG_DEBUG(g->log, "指令 %u 处理失败 src=%s",
+                           (unsigned)cmd, netd_conn_ntop(c, ep, sizeof(ep)));
                 break;
             }
         }
@@ -135,7 +141,7 @@ cleanup:
         q_mem_zero(resp, NETD_RESP_MAX);
         free(resp);
     }
-    conn_release(g, c->src_ip);
+    conn_release(g, &c->src_addr);
     q_net_close(c->fd);
     q_mem_zero(c, sizeof(*c));
     free(c);
@@ -152,10 +158,11 @@ void on_accept(q_fd_t fd, uint32_t events, void *ctx)
         struct sockaddr_storage ss;
         socklen_t  slen     = sizeof(ss);
         int        cfd      = (int)accept((int)fd, (struct sockaddr *)&ss, &slen);
-        uint32_t   src_ip   = 0u;
+        netd_addr_t src_addr;
         uint16_t   src_port = 0u;
         netd_conn_t *c;
 
+        memset(&src_addr, 0, sizeof(src_addr));
         if (cfd < 0)
         {
             if (errno == EINTR)
@@ -166,18 +173,22 @@ void on_accept(q_fd_t fd, uint32_t events, void *ctx)
         if (ss.ss_family == AF_INET)
         {
             struct sockaddr_in *a = (struct sockaddr_in *)&ss;
-            src_ip   = a->sin_addr.s_addr;   /* 已是网络序，与 q_chan_token_t.src_ip 一致 */
+            src_addr.fam = AF_INET;
+            memcpy(src_addr.b, &a->sin_addr.s_addr, 4);  /* 网络序字节 */
             src_port = a->sin_port;
         }
         else if (ss.ss_family == AF_INET6)
         {
-            /* TODO(二期)：§6.4 的 src_ip 为 uint32 IPv4，IPv6 需扩字段或改用 16 字节键；
-               当前 IPv6 源 IP 记为 0，不参与 IP 维度限流区分。 */
-            src_ip = 0u;
+            /* IPv6 源 IP 同样作为限流键（§6.4 二期）：写入 16 字节地址，
+               与 IPv4 统一参与 IP 维度并发/新建速率/失败拉黑区分。 */
+            struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)&ss;
+            src_addr.fam = AF_INET6;
+            memcpy(src_addr.b, &a6->sin6_addr.s6_addr, 16);
+            src_port = a6->sin6_port;
         }
 
         /* 准入：全局并发 + 单 IP 并发 + 拉黑 + 新建速率 */
-        if (conn_acquire(g, src_ip) != 0)
+        if (conn_acquire(g, &src_addr) != 0)
         {
             q_net_close((q_fd_t)cfd);
             continue;
@@ -186,12 +197,12 @@ void on_accept(q_fd_t fd, uint32_t events, void *ctx)
         c = (netd_conn_t *)calloc(1, sizeof(*c));
         if (!c)
         {
-            conn_release(g, src_ip);
+            conn_release(g, &src_addr);
             q_net_close((q_fd_t)cfd);
             continue;
         }
         c->fd        = (q_fd_t)cfd;
-        c->src_ip    = src_ip;
+        c->src_addr  = src_addr;
         c->src_port  = src_port;
         c->st        = Q_CHAN_ST_NEW;
         c->accept_ts = (time_t)now_sec();
@@ -200,7 +211,7 @@ void on_accept(q_fd_t fd, uint32_t events, void *ctx)
         if (q_tpool_dispatch(g->pool, conn_worker, c) != 0)
         {
             /* 队列满：拒绝并回收配额，停止本轮 accept 避免雪崩 */
-            conn_release(g, src_ip);
+            conn_release(g, &src_addr);
             q_net_close(c->fd);
             free(c);
             break;

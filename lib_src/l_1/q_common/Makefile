@@ -9,12 +9,16 @@
 TARGET    = libqcommon.a
 TARGET_SO = libqcommon.so
 OBJS   = api/q_common_signal.o \
-         api/q_common_harden.o
+         api/q_common_harden.o \
+         api/q_common_seccomp.o
 
 include ../../../include/Makefile.inc
 
-# 注：当前骨架未调用 libseccomp，暂不 -lseccomp；实现 seccomp 后在此追加：
-# LIBS += $(LIB_SECCOMP)
+# seccomp 由 q_common_seccomp.c 实现（daemon_seccomp_apply）。
+# 注：静态库 .a 仅 ar 归档、不参与链接，故此处无需 -lseccomp；真正链接发生在
+# 最终可执行程序（knockd/netd/bizd 的 Makefile 须在其 LIBS 保留 -lseccomp）。
+# 下行仅作依赖声明占位（lib 构建不消费，仅供阅读）：
+LIBS += $(LIB_SECCOMP)
 
 # 对外头文件经 Makefile.inc 内置 install_hdr 归集（HEADER 默认即 q_common.h），无需重写
 

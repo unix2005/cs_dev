@@ -26,6 +26,7 @@ OBJS   = api/q_net_socket_tcp.o \
          api/q_net_udp_recv.o \
          api/q_net_addr_resolve.o \
          api/q_net_addr_any.o \
+         api/q_net_addr_ntop.o \
          api/q_net_send_blocking.o \
          api/q_net_recv_blocking.o \
          api/q_net_srv_create.o \

@@ -118,7 +118,6 @@ static int bizd_hnd(uint16_t cmd, const uint8_t *body, size_t body_len,
     bizd_conn_t  *c;
     cJSON        *root, *ctx, *params;
     char          id[32], *req = NULL, *rsp = NULL;
-    uint32_t      result = Q_IPC_R_UNAVAILABLE;
     int           rc = -1;
 
     if (!u || !u->g || !u->c)

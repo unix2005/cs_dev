@@ -19,9 +19,10 @@ QLIBS  = $(call ld_group, \
          $(LIB)/libqcommon.a $(LIB)/libqreactor.a $(LIB)/libqxcfg.a \
          $(LIB)/libqipc.a $(LIB)/libqcodec.a $(LIB)/libqchan.a \
          $(LIB)/libqsec.a $(LIB)/libqcrypto.a \
-         $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
+         $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a \
+         $(LIB)/libqnet.a)
 # 系统 libxml2（q_xcfg 依赖）；cJSON 为本地 vendored（$(SOFT_HOME)/cJSON）
-LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 \
+LIBS   = $(QLIBS) $(LIB_PTHREAD) -lseccomp -lxml2 \
          -I$(SOFT_HOME)/cJSON/include \
          -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64 \
          -L$(SOFT_HOME)/cJSON/lib -lcjson -Wl,-rpath,$(SOFT_HOME)/cJSON/lib

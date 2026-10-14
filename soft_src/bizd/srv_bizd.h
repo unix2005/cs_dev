@@ -139,6 +139,17 @@ typedef struct
     bizd_ctx_t      *g;
 } bizd_conn_t;
 
+/* 客户端身份（来自 netd IPC 转发的 Q_IPC_T_SRCIP，仅 IPv4、**无端口**）。
+   薄封装：委托通用 q_net_addr_ntop 格式化；因 IPC 不携带源端口，port 恒传 0，
+   日志表现为 "ip:0"（排障以 IP 定位即可）。返回 buf；c==NULL 或缓冲不足回传 "?"。
+   调用方需提供 char buf[INET6_ADDRSTRLEN + 8]。 */
+static inline const char *bizd_conn_ntop(const bizd_conn_t *c, char *buf, size_t buflen)
+{
+    if (!c || buflen < INET6_ADDRSTRLEN + 8)
+        return "?";
+    return q_net_addr_ntop(AF_INET, (const void *)&c->src_ip, 0, buf, buflen);
+}
+
 struct bizd_ctx
 {
     q_reactor_t   *reactor;

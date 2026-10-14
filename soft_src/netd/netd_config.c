@@ -80,6 +80,8 @@ void cfg_defaults(void)
     g_cfg.log_console  = 1;
     g_cfg.log_max_size = 10u * 1024u * 1024u;
     g_cfg.enable_ipv6  = 0;
+    g_cfg.chroot_dir[0] = '\0';   /* 空 = 不 chroot（生产建议 /var/empty/netd） */
+    g_cfg.drop_user[0]  = '\0';   /* 空 = 不降权（生产建议专用非特权用户 netd） */
     snprintf(g_cfg.ipc_path,  sizeof(g_cfg.ipc_path),  "%s", NETD_IPC_PATH_DEF);
     snprintf(g_cfg.priv_file, sizeof(g_cfg.priv_file), "%s", NETD_PRIV_FILE_DEF);
     snprintf(g_cfg.pub_file,  sizeof(g_cfg.pub_file),  "%s", NETD_PUB_FILE_DEF);
@@ -105,6 +107,12 @@ int load_config(const char *path)
     g_cfg.key_id      = (uint16_t)q_xcfg_get_int(xc, "config.netd.key_id", (int)g_cfg.key_id);
     g_cfg.enable_ipv6 = q_xcfg_get_bool(xc, "config.netd.enable_ipv6", false) ? 1 : 0;
     g_cfg.log_console = q_xcfg_get_bool(xc, "config.netd.log_console", true) ? 1 : 0;
+
+    v = q_xcfg_get_string(xc, "config.netd.chroot_dir", g_cfg.chroot_dir);
+    if (v) { snprintf(g_cfg.chroot_dir, sizeof(g_cfg.chroot_dir), "%s", v); free(v); }
+
+    v = q_xcfg_get_string(xc, "config.netd.drop_user", g_cfg.drop_user);
+    if (v) { snprintf(g_cfg.drop_user, sizeof(g_cfg.drop_user), "%s", v); free(v); }
 
     v = q_xcfg_get_string(xc, "config.netd.ipc_path", g_cfg.ipc_path);
     if (v) { snprintf(g_cfg.ipc_path, sizeof(g_cfg.ipc_path), "%s", v); free(v); }
