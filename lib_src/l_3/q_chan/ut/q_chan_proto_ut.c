@@ -90,21 +90,24 @@ static int test_token(void)
     uint8_t cid[Q_CHAN_CHANID_LEN] = {0}; cid[0] = 0xAA;
     uint8_t uid[Q_CHAN_USERID_LEN] = {0}; uid[0] = 0xBB;
     uint8_t did[Q_CHAN_DEVID_LEN] = {0}; did[0] = 0xCC;
-    uint32_t ip = 0x7F000001u; /* 127.0.0.1 */
+    uint8_t fam = 4;
+    uint8_t addr[16] = {0};
+    addr[0] = 127; addr[1] = 0; addr[2] = 0; addr[3] = 1;  /* 127.0.0.1 */
 
     q_chan_token_t t;
-    if (q_chan_token_issue(cid, uid, did, ip, 1800, &t) != 0) return -1;
+    if (q_chan_token_issue(cid, uid, did, fam, addr, 1800, &t) != 0) return -1;
 
     uint64_t now = (uint64_t)time(NULL);
-    if (q_chan_token_validate(&t, cid, uid, did, ip, now) != 0) return -1;
+    if (q_chan_token_validate(&t, cid, uid, did, fam, addr, now) != 0) return -1;
 
-    /* IP 不符 -> 失败 */
-    if (q_chan_token_validate(&t, cid, uid, did, 0x01020304u, now) != -1) return -1;
+    /* 地址不符 -> 失败 */
+    uint8_t bad_addr[16] = {0}; bad_addr[0] = 1; bad_addr[1] = 2; bad_addr[2] = 3; bad_addr[3] = 4;
+    if (q_chan_token_validate(&t, cid, uid, did, fam, bad_addr, now) != -1) return -1;
     /* channel_id 不符 -> 失败 */
     uint8_t bad[Q_CHAN_CHANID_LEN] = {0};
-    if (q_chan_token_validate(&t, bad, uid, did, ip, now) != -1) return -1;
+    if (q_chan_token_validate(&t, bad, uid, did, fam, addr, now) != -1) return -1;
     /* 过期 -> 失败 */
-    if (q_chan_token_validate(&t, cid, uid, did, ip, now + 2000) != -1) return -1;
+    if (q_chan_token_validate(&t, cid, uid, did, fam, addr, now + 2000) != -1) return -1;
 
     return 0;
 }

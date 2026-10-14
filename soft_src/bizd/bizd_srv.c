@@ -38,8 +38,17 @@ static int parse_req(const uint8_t *buf, size_t len, bizd_conn_t *c)
             c->body_len = vlen;
             break;
         case Q_IPC_T_SRCIP:
-            if (vlen >= 4u)
-                memcpy(&c->src_ip, val, 4u);
+            if (vlen >= 17u)
+            {
+                c->src_fam = (val[0] == 6u) ? 6u : 4u;
+                memcpy(c->src_ip, val + 1u, 16u);
+            }
+            else if (vlen == 4u)   /* 旧版 netd 兼容：仅 4 字节 IPv4 */
+            {
+                c->src_fam = 4u;
+                memcpy(c->src_ip, val, 4u);
+                memset(c->src_ip + 4u, 0, 12u);
+            }
             break;
         case Q_IPC_T_CHANID:
             if (vlen >= 32u)
@@ -56,6 +65,15 @@ static int parse_req(const uint8_t *buf, size_t len, bizd_conn_t *c)
                 c->has_token = 1;
             }
             break;
+        case Q_IPC_T_REQID:
+            if (vlen > 0u)
+            {
+                size_t n = (vlen < sizeof(c->req_id) - 1u) ? vlen
+                                                           : (sizeof(c->req_id) - 1u);
+                memcpy(c->req_id, val, n);
+                c->req_id[n] = '\0';
+            }
+            break;
         default:
             break;
         }
@@ -67,9 +85,11 @@ static int parse_req(const uint8_t *buf, size_t len, bizd_conn_t *c)
 void bizd_conn_worker(void *arg)
 {
     bizd_conn_t *c   = (bizd_conn_t *)arg;
+    q_chan_disp_t *disp = NULL;              /* 指令分发表：按连接创建（ud 指向本连接） */
+    bizd_udata_t  ud;
     uint8_t     *req = NULL, *resp = NULL;
     size_t       reqlen = 0u;
-    char         ep[INET6_ADDRSTRLEN + 8];   /* 客户端真实源 IP（来自 netd IPC，无端口） */
+    char         cid[INET6_ADDRSTRLEN + 128];  /* 跨服务对账标识：src_ip#req_id[ (uid=...) ] */
 
     req  = (uint8_t *)malloc(Q_IPC_MAXMSG);
     resp = (uint8_t *)malloc(Q_IPC_MAXMSG);
@@ -90,30 +110,41 @@ void bizd_conn_worker(void *arg)
         if (q_codec_tlv_encode(resp, Q_IPC_MAXMSG, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
             (void)bizd_send_frame(c->fd, resp, n);
         QLOG_WARN(c->g->log, "请求解析失败 src=%s（回 BADREQ）",
-                  bizd_conn_ntop(c, ep, sizeof(ep)));
+                  bizd_cid(c, cid, sizeof(cid)));
         goto cleanup;
     }
 
-    bizd_conn_ntop(c, ep, sizeof(ep));   /* 客户端 IP 已解析，固定用于后续日志 */
+    /* 客户端 IP 已解析；后续日志统一用 bizd_cid() 生成 src_ip#req_id 标识（req_id 在 bizd_hnd 内赋值） */
+
+    /* 指令分发表按连接创建（ud 指向本连接上下文，与 netd 同，避免跨连接共享状态） */
+    disp = q_chan_disp_create();
+    if (!disp)
+        goto cleanup;
+    ud.g = c->g;
+    ud.c = c;
+    if (bizd_disp_init(disp, &ud) != 0)
+        goto cleanup;
 
     /* 分发到下游微服务：out 中已是外层 TLV(RESULT)+TLV(BODY) */
     {
         size_t outlen = 0u;
-        if (q_chan_disp_invoke(c->g->disp, c->cmd, c->body, c->body_len,
+        if (q_chan_disp_invoke(disp, c->cmd, c->body, c->body_len,
                                resp, Q_IPC_MAXMSG, &outlen) == 0 && outlen > 0u)
         {
             (void)bizd_send_frame(c->fd, resp, outlen);
             QLOG_DEBUG(c->g->log, "请求处理完成 src=%s cmd=%u",
-                       ep, (unsigned)c->cmd);
+                       bizd_cid(c, cid, sizeof(cid)), (unsigned)c->cmd);
         }
         else
         {
             QLOG_WARN(c->g->log, "指令分发失败 src=%s cmd=%u",
-                      ep, (unsigned)c->cmd);
+                      bizd_cid(c, cid, sizeof(cid)), (unsigned)c->cmd);
         }
     }
 
 cleanup:
+    if (disp)
+        q_chan_disp_destroy(disp);
     q_ipc_close(c->fd, NULL);
     free(req);
     free(resp);

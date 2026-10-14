@@ -148,21 +148,24 @@ extern "C"
         uint8_t channel_id[Q_CHAN_CHANID_LEN];
         uint8_t user_id[Q_CHAN_USERID_LEN];
         uint8_t device_id[Q_CHAN_DEVID_LEN];
-        uint32_t src_ip;      /* 网络序 IPv4 */
+        uint8_t  src_fam;     /* 地址族：4=IPv4 / 6=IPv6（与 netd/bizd 的 src_fam 约定一致） */
+        uint8_t  src_ip[16];  /* 客户端源地址（网络序，扩为 16 字节以支持 IPv6） */
         uint64_t issue_time;  /* 秒 */
         uint64_t expire_time; /* 秒 */
     } q_chan_token_t;
 
-    /* 签发 Token：token 取 32 字节随机，绑定传入的 channel_id/user_id/device_id/src_ip，
-   有效期 ttl_sec（默认 1800）。成功 0，失败 -1（需先经 q_chan_binding 取得 channel_id）。 */
+    /* 签发 Token：token 取 32 字节随机，绑定传入的 channel_id/user_id/device_id/src_addr
+   （族 + 16 字节地址，支持 IPv6）。有效期 ttl_sec（默认 1800）。成功 0，失败 -1
+   （需先经 q_chan_binding 取得 channel_id）。 */
     int q_chan_token_issue(const uint8_t channel_id[Q_CHAN_CHANID_LEN], const uint8_t user_id[Q_CHAN_USERID_LEN],
-                           const uint8_t device_id[Q_CHAN_DEVID_LEN], uint32_t src_ip, uint64_t ttl_sec,
+                           const uint8_t device_id[Q_CHAN_DEVID_LEN], uint8_t src_fam,
+                           const uint8_t src_addr[16], uint64_t ttl_sec,
                            q_chan_token_t *out);
 
     /* 校验 Token：比对绑定字段 + 有效期（now_sec）。全部通过返回 0，否则 -1。 */
     int q_chan_token_validate(const q_chan_token_t *t, const uint8_t channel_id[Q_CHAN_CHANID_LEN],
                               const uint8_t user_id[Q_CHAN_USERID_LEN], const uint8_t device_id[Q_CHAN_DEVID_LEN],
-                              uint32_t src_ip, uint64_t now_sec);
+                              uint8_t src_fam, const uint8_t src_addr[16], uint64_t now_sec);
 
 #ifdef __cplusplus
 }

@@ -127,7 +127,8 @@ typedef struct bizd_ctx bizd_ctx_t;
 typedef struct
 {
     int              fd;               /* q_ipc 系列接口使用 int */
-    uint32_t         src_ip;           /* 网络序 IPv4 */
+    uint8_t          src_fam;          /* 地址族：4=IPv4 / 6=IPv6（来自 IPC SRCIP TLV） */
+    uint8_t          src_ip[16];       /* 客户端源地址（网络序，扩为 16B 以支持 IPv6） */
     uint16_t         cmd;              /* netd 转发的业务指令字 */
     uint8_t          channel_id[32];   /* 通道绑定 ID */
     uint8_t          user_id[32];      /* SM3(用户名) */
@@ -136,6 +137,7 @@ typedef struct
     int              has_token;
     const uint8_t   *body;             /* 业务体（内层 TLV 序列） */
     size_t           body_len;
+    char             req_id[32];       /* 本请求 id：bizd 转发时生成，与下游 JSON "id" 一致，用于跨服务对账 */
     bizd_ctx_t      *g;
 } bizd_conn_t;
 
@@ -147,7 +149,39 @@ static inline const char *bizd_conn_ntop(const bizd_conn_t *c, char *buf, size_t
 {
     if (!c || buflen < INET6_ADDRSTRLEN + 8)
         return "?";
-    return q_net_addr_ntop(AF_INET, (const void *)&c->src_ip, 0, buf, buflen);
+    return q_net_addr_ntop((c->src_fam == 6) ? AF_INET6 : AF_INET,
+                           (const void *)c->src_ip, 0, buf, buflen);
+}
+
+/* 跨服务对账标识：src_ip#req_id（req_id 即发给下游 JSON 的 "id"，两端一致便于 grep 关联同一请求）；
+   已登录请求（user_id 非全 0）附 (uid=<SM3(用户名) 64hex>)。返回 buf；c==NULL 或缓冲不足回传 "?"。 */
+static inline const char *bizd_cid(const bizd_conn_t *c, char *buf, size_t buflen)
+{
+    char        ep[INET6_ADDRSTRLEN + 8];
+    const char *ip;
+    size_t      i;
+    int         nz = 0;
+
+    if (!c || buflen < INET6_ADDRSTRLEN + 128)
+        return "?";
+    ip = bizd_conn_ntop(c, ep, sizeof(ep));
+    if (c->req_id[0])
+    {
+        for (i = 0u; i < 32u; i++)
+            if (c->user_id[i]) { nz = 1; break; }
+        if (nz)
+        {
+            char hex[65];
+            for (i = 0u; i < 32u; i++)
+                snprintf(hex + i * 2u, 3u, "%02x", (unsigned)c->user_id[i]);
+            snprintf(buf, buflen, "%s#%s(uid=%s)", ip, c->req_id, hex);
+        }
+        else
+            snprintf(buf, buflen, "%s#%s", ip, c->req_id);
+    }
+    else
+        snprintf(buf, buflen, "%s", ip);
+    return buf;
 }
 
 struct bizd_ctx

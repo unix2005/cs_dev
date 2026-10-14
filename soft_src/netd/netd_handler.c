@@ -75,15 +75,21 @@ static int hnd_biz(uint16_t cmd, const uint8_t *body, size_t body_len,
     uint32_t result = Q_IPC_R_UNAVAILABLE;
     size_t   n = 0u, off = 0u;
     uint8_t  rb[4];
+    char     cid[INET6_ADDRSTRLEN + 128];
 
     if (!u || !u->g || !u->c)
         return -1;
 
+    QLOG_INFO(u->g->log, "转发业务请求 %s cmd=%u -> bizd",
+              netd_cid(u->c, cid, sizeof(cid)), (unsigned)cmd);
+
     if (ipc_forward(u->g, &u->c->src_addr, cmd, body, body_len,
-                    u->c->channel_id, u->c->token.user_id,
+                    u->c->channel_id, u->c->token.user_id, u->c->req_id,
                     &result, out, outcap, out_len) != 0)
     {
         /* bizd 不可用：回带结果码的响应，避免客户端空等 */
+        QLOG_WARN(u->g->log, "转发业务请求失败 %s cmd=%u",
+                  netd_cid(u->c, cid, sizeof(cid)), (unsigned)cmd);
         put_be32(rb, Q_IPC_R_UNAVAILABLE);
         if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4, &n) == 0)
         {
@@ -150,17 +156,23 @@ int do_login(netd_conn_t *c, const uint8_t *body, size_t blen,
              uint8_t *out, size_t outcap, size_t *out_len)
 {
     uint32_t result = Q_IPC_R_UNAVAILABLE;
+    char     cid[INET6_ADDRSTRLEN + 128];
 
     login_bind_ids(c, body, blen);
 
+    QLOG_INFO(c->g->log, "转发登录请求 %s -> bizd",
+              netd_cid(c, cid, sizeof(cid)));
+
     if (ipc_forward(c->g, &c->src_addr, Q_CHAN_CMD_LOGIN, body, blen,
-                    c->channel_id, c->token.user_id,
+                    c->channel_id, c->token.user_id, c->req_id,
                     &result, out, outcap, out_len) != 0)
     {
         /* bizd 不可用：仍回带结果码的响应，避免客户端空等 */
         size_t n = 0u, off = 0u;
         uint8_t rb[4];
 
+        QLOG_WARN(c->g->log, "转发登录请求失败 %s",
+                  netd_cid(c, cid, sizeof(cid)));
         put_be32(rb, Q_IPC_R_UNAVAILABLE);
         if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4, &n) == 0)
         {
@@ -170,14 +182,20 @@ int do_login(netd_conn_t *c, const uint8_t *body, size_t blen,
         return 0;
     }
 
+    QLOG_INFO(c->g->log, "登录请求已转发 %s result=%u",
+              netd_cid(c, cid, sizeof(cid)), result);
+
     if (result != Q_IPC_R_OK)
         return 0;
 
-    /* 签发会话 Token，绑定 channel_id + user_id + device_id + src_ip（§6.3）。
-       token.src_ip 仍为 uint32 IPv4（§6.4 约定；IPv6 客户端此处记 0）。 */
-    if (q_chan_token_issue(c->channel_id, c->token.user_id, c->token.device_id,
-                           netd_addr_v4(&c->src_addr), NETD_TOKEN_TTL_SEC, &c->token) != 0)
-        return 0;
+    /* 签发会话 Token，绑定 channel_id + user_id + device_id + 源地址（v4/v6 统一，
+       扩为 [1B 族][16B 地址] 以支持 IPv6 客户端溯源，与此处 netd_addr_t 一致）。 */
+    {
+        uint8_t tfam = (c->src_addr.fam == AF_INET6) ? 6u : 4u;
+        if (q_chan_token_issue(c->channel_id, c->token.user_id, c->token.device_id,
+                               tfam, c->src_addr.b, NETD_TOKEN_TTL_SEC, &c->token) != 0)
+            return 0;
+    }
 
     c->has_token = 1;
     {

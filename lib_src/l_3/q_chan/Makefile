@@ -43,9 +43,9 @@ all: lib_static lib_so install_lib install_hdr
 # 单元测试：构建并运行 ut/ 两个小程序（链接 libqchan.so，rpath 指向 lib/）
 ut: all
 	mkdir -p ut/bin
-	$(CC) $(CFLAGS) -I. ut/q_chan_ut.c -o ut/bin/q_chan_ut -L$(LIB) -lqchan -lqcodec -lqnet -lqcrypto -lqrand -lqreactor -lqutil -lqmem -lqlog $(LIB_PTHREAD) -L$(LIBS) -lcrypto -Wl,-rpath,$(LIB) -Wl,-rpath,$(LIBS)
+	$(CC) $(CFLAGS) -I. ut/q_chan_ut.c -o ut/bin/q_chan_ut -L$(LIB) -lqchan -lqcodec -lqnet -lqcrypto -lqrand -lqreactor -lqutil -lqmem -lqlog $(LIB_PTHREAD) -lqsec -L$(LIBS) -lcrypto -Wl,-rpath,$(LIB) -Wl,-rpath,$(LIBS)
 	./ut/bin/q_chan_ut
-	$(CC) $(CFLAGS) -I. ut/q_chan_proto_ut.c -o ut/bin/q_chan_proto_ut -L$(LIB) -lqchan -lqcodec -lqnet -lqcrypto -lqrand -lqreactor -lqutil -lqmem -lqlog -L$(LIBS) -lcrypto -Wl,-rpath,$(LIB) -Wl,-rpath,$(LIBS)
+	$(CC) $(CFLAGS) -I. ut/q_chan_proto_ut.c -o ut/bin/q_chan_proto_ut -L$(LIB) -lqchan -lqcodec -lqnet -lqcrypto -lqrand -lqreactor -lqutil -lqmem -lqlog -lqsec -L$(LIBS) -lcrypto -Wl,-rpath,$(LIB) -Wl,-rpath,$(LIBS)
 	./ut/bin/q_chan_proto_ut
 
 .PHONY: install_hdr ut

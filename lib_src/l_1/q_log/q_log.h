@@ -190,12 +190,25 @@ extern "C"
     }
 
 /* 便捷宏：自动填充文件/行号 */
+/*
 #define QLOG_TRACE(log, ...) q_log_write((log), Q_LOG_TRACE, __FILE__, __LINE__, __VA_ARGS__)
 #define QLOG_DEBUG(log, ...) q_log_write((log), Q_LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__)
 #define QLOG_INFO(log, ...) q_log_write((log), Q_LOG_INFO, __FILE__, __LINE__, __VA_ARGS__)
 #define QLOG_WARN(log, ...) q_log_write((log), Q_LOG_WARN, __FILE__, __LINE__, __VA_ARGS__)
 #define QLOG_ERROR(log, ...) q_log_write((log), Q_LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
 #define QLOG_FATAL(log, ...) q_log_write((log), Q_LOG_FATAL, __FILE__, __LINE__, __VA_ARGS__)
+*/
+// 普通日志：不携带文件、行号
+#define QLOG_TRACE(log, ...) q_log_write((log), Q_LOG_TRACE, NULL, 0, __VA_ARGS__)
+#define QLOG_DEBUG(log, ...) q_log_write((log), Q_LOG_DEBUG, NULL, 0, __VA_ARGS__)
+#define QLOG_INFO(log, ...)  q_log_write((log), Q_LOG_INFO,  NULL, 0, __VA_ARGS__)
+#define QLOG_WARN(log, ...)  q_log_write((log), Q_LOG_WARN,  NULL, 0, __VA_ARGS__)
+#define QLOG_AUDIT(log, ...) q_log_write((log), Q_LOG_AUDIT, NULL, 0, __VA_ARGS__)
+
+// 错误日志：携带文件、行号
+#define QLOG_ERROR(log, ...) q_log_write((log), Q_LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
+#define QLOG_FATAL(log, ...) q_log_write((log), Q_LOG_FATAL, __FILE__, __LINE__, __VA_ARGS__)
+
 
 #ifdef __cplusplus
 }

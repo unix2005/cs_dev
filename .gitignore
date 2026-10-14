@@ -27,6 +27,7 @@ cmake_install.cmake
 *~
 .idea/
 .vscode/
+bin/
 
 # 本机临时文件
 *.log

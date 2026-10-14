@@ -43,13 +43,15 @@ static char *to_hex(const uint8_t *b, size_t len)
     return s;
 }
 
-/* 网络序 IPv4 -> 点分十进制字符串 */
-static void add_ipstr(cJSON *o, const char *k, uint32_t ip)
+/* 客户端源地址（v4/v6 统一）-> 字符串，写入 JSON 的 ctx.src_ip */
+static void add_ipstr(cJSON *o, const char *k, uint8_t fam, const uint8_t *addr)
 {
-    const unsigned char *p = (const unsigned char *)&ip;
-    char buf[32];
+    char buf[INET6_ADDRSTRLEN];
 
-    snprintf(buf, sizeof(buf), "%u.%u.%u.%u", p[0], p[1], p[2], p[3]);
+    if (fam == 6u)
+        inet_ntop(AF_INET6, addr, buf, sizeof(buf));
+    else
+        inet_ntop(AF_INET, addr, buf, sizeof(buf));
     cJSON_AddStringToObject(o, k, buf);
 }
 
@@ -117,20 +119,23 @@ static int bizd_hnd(uint16_t cmd, const uint8_t *body, size_t body_len,
     bizd_udata_t *u = (bizd_udata_t *)ud;
     bizd_conn_t  *c;
     cJSON        *root, *ctx, *params;
-    char          id[32], *req = NULL, *rsp = NULL;
+    char         *req = NULL, *rsp = NULL;
     int           rc = -1;
 
     if (!u || !u->g || !u->c)
         return -1;
     c = u->c;
 
-    next_req_id(id, sizeof(id));
+    /* 请求号优先采用 netd 经 IPC REQID TLV 透传的值（整条链一致），
+       仅在缺失时（如直接测试未带 REQID）回退到本地生成。 */
+    if (c->req_id[0] == '\0')
+        next_req_id(c->req_id, sizeof(c->req_id));
 
     root = cJSON_CreateObject();
     if (!root)
         goto out;
     cJSON_AddNumberToObject(root, "ver", 1);
-    cJSON_AddStringToObject(root, "id", id);
+    cJSON_AddStringToObject(root, "id", c->req_id);
     cJSON_AddNumberToObject(root, "cmd", (double)cmd);
 
     ctx = cJSON_CreateObject();
@@ -138,7 +143,7 @@ static int bizd_hnd(uint16_t cmd, const uint8_t *body, size_t body_len,
     {
         char *h;
 
-        add_ipstr(ctx, "src_ip", c->src_ip);
+        add_ipstr(ctx, "src_ip", c->src_fam, c->src_ip);
         h = to_hex(c->channel_id, 32u);
         if (h) { cJSON_AddStringToObject(ctx, "channel_id", h); free(h); }
         h = to_hex(c->user_id, 32u);
@@ -168,19 +173,31 @@ static int bizd_hnd(uint16_t cmd, const uint8_t *body, size_t body_len,
 out:
     if (req)
         free(req);
-    if (rsp)
-        free(rsp);
 
-    /* 组装外层 TLV 响应：RESULT + BODY（下游 data 原样回传） */
-    if (outcap >= (4u + 4u))
+    /* 组装外层 TLV 响应：RESULT [+ BODY（下游响应原样回传，netd 透传给客户端）] */
     {
+        size_t  off = 0u, n = 0u;
         uint8_t rb[4];
-        size_t  n = 0u;
 
         bizd_put_be32(rb, (rc == 0) ? (uint32_t)Q_IPC_R_OK : (uint32_t)Q_IPC_R_UNAVAILABLE);
-        if (q_codec_tlv_encode(out, outcap, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
-            *out_len = n;
+        if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
+        {
+            off += n;
+            if (rc == 0 && rsp)
+            {
+                size_t blen = strlen(rsp);
+                if (blen > Q_IPC_TLV_MAX)
+                    blen = Q_IPC_TLV_MAX;
+                if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_BODY,
+                                       (const uint8_t *)rsp, (uint16_t)blen, &n) == 0)
+                    off += n;
+            }
+            *out_len = off;
+        }
     }
+
+    if (rsp)
+        free(rsp);
     return rc;
 }
 

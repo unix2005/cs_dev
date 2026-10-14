@@ -18,6 +18,7 @@ void conn_worker(void *arg)
     q_chan_t      *ch = NULL;
     uint8_t       *plain = NULL, *resp = NULL;
     char           ep[INET6_ADDRSTRLEN + 8];   /* 连接端点 "ip:port"，用于日志定位 */
+    char           cid[INET6_ADDRSTRLEN + 128]; /* 跨服务对账标识 src_ip#req_id[(uid=...)] */
 
     plain = (uint8_t *)malloc(NETD_PLAIN_MAX);
     resp  = (uint8_t *)malloc(NETD_RESP_MAX);
@@ -73,6 +74,12 @@ void conn_worker(void *arg)
         if (q_chan_receive(ch, c->fd, plain, NETD_PLAIN_MAX, &plainlen, &cmd) != 0)
             break;                                  /* EOF / 校验失败 / 超时 */
 
+        /* 每帧一个请求号：随 IPC 透传到 bizd/微服务，保证整条链 src_ip#id 一致 */
+        netd_next_req_id(c->req_id, sizeof(c->req_id));
+
+        QLOG_INFO(g->log, "[recv] %s cmd=%u <-- 客户端",
+                  netd_cid(c, cid, sizeof(cid)), (unsigned)cmd);
+
         /* 未认证阶段配额（§6.4）：包数 / 字节 / 存续时长 */
         c->pkts++;
         c->bytes += plainlen;
@@ -124,6 +131,9 @@ void conn_worker(void *arg)
 
         if (outlen > 0u && q_chan_transmit(ch, c->fd, resp, outlen, cmd) != 0)
             break;
+
+        QLOG_INFO(g->log, "[send] %s cmd=%u --> 客户端 outlen=%zu",
+                  netd_cid(c, cid, sizeof(cid)), (unsigned)cmd, outlen);
     }
 
 cleanup:

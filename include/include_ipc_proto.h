@@ -27,11 +27,16 @@
 /* ===================== 外层 TLV tag（netd <-> bizd） ===================== */
 #define Q_IPC_T_CMD     0x0001u  /* 业务指令字   val: uint16 网络序 */
 #define Q_IPC_T_BODY    0x0002u  /* 业务体       val: 内层 TLV 序列 */
-#define Q_IPC_T_SRCIP   0x0003u  /* 客户端源 IP  val: uint32 网络序 */
+#define Q_IPC_T_SRCIP   0x0003u  /* 客户端源 IP  val: [1B 族:4=IPv4 / 6=IPv6][16B 地址]
+                                      地址扩为 16 字节以支持 IPv6；IPv4 时地址占低 4 字节
+                                      （高 12 字节为 0），旧版 netd 仅发 4 字节时按 IPv4 兼容解析 */
 #define Q_IPC_T_CHANID  0x0004u  /* 通道绑定 ID  val: 32B */
 #define Q_IPC_T_USERID  0x0005u  /* SM3(用户名)  val: 32B */
 #define Q_IPC_T_TOKEN   0x0006u  /* 会话 Token   val: 32B 或 148B 规范串 */
 #define Q_IPC_T_RESULT  0x0007u  /* 结果码       val: uint32 网络序 */
+#define Q_IPC_T_REQID   0x0008u  /* 请求号       val: 字符串（netd 生成，透传 bizd / 微服务；
+                                      与 bizd->微服务的 JSON "id" 一致，用于跨 netd/bizd/微服务
+                                      日志对账，grep 同一 src_ip#id 即可关联整条链） */
 
 /* ===================== 结果码 ===================== */
 #define Q_IPC_R_OK            0u   /* 成功 */

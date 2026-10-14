@@ -7,13 +7,15 @@
 
 int q_chan_token_validate(const q_chan_token_t *t, const uint8_t channel_id[Q_CHAN_CHANID_LEN],
                           const uint8_t user_id[Q_CHAN_USERID_LEN], const uint8_t device_id[Q_CHAN_DEVID_LEN],
-                          uint32_t src_ip, uint64_t now_sec)
+                          uint8_t src_fam, const uint8_t src_addr[16], uint64_t now_sec)
 {
-    if (!t || !channel_id || !user_id || !device_id)
+    if (!t || !channel_id || !user_id || !device_id || !src_addr)
         return -1;
     if (now_sec >= t->expire_time)
         return -1;
-    if (t->src_ip != src_ip)
+    if (t->src_fam != src_fam)
+        return -1;
+    if (memcmp(t->src_ip, src_addr, 16u) != 0)
         return -1;
     if (memcmp(t->channel_id, channel_id, Q_CHAN_CHANID_LEN) != 0)
         return -1;

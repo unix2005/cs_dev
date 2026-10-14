@@ -31,6 +31,7 @@
 static knockd_cfg_t g_cfg;
 static q_log_t *g_log = NULL;   /* 全局日志句柄（q_log_open 失败亦回退控制台，非空） */
 static char g_audit_prev[65] = "0"; /* 审计链上一条哈希(hex)；首条 prev="0" */
+static uint64_t g_knock_seq = 0;    /* 本地请求序号（无锁原子），用于跨服务对账标识 src_ip#seq */
 
 static uint8_t g_spa_key[SPA_KEY_LEN];
 static q_reactor_t *g_reactor = NULL;
@@ -63,7 +64,8 @@ static q_log_level_t parse_log_level(const char *s)
     return Q_LOG_INFO;
 }
 
-/* SPA 报文 user_id(32B) 转 hex（供审计；user_id 本身已是 SM3 哈希，非明文） */
+/* 32 字节摘要转 hex（供审计链式哈希落盘；同时用于 SPA 报文 user_id 可读展示，
+   user_id 本身已是 SM3 哈希、非明文）。 */
 static const char *spa_uid_hex(const uint8_t uid[32], char out[65])
 {
     static const char hex[] = "0123456789abcdef";
@@ -169,41 +171,45 @@ static void on_knock(int fd, uint32_t events, void *ctx)
     if (n != (ssize_t)sizeof(q_spa_pkt_t))
         return;
 
-    /* 源端点（v4/v6 统一）：
-       - ep（"ip:port"，端口转本机序）供日志/审计，与本项目其它守护进程一致，
-         由通用 q_net_addr_ntop 格式化；
-       - ip_only（纯 IP）专供 nft 放行集合元素（集合类型为 ipv4_addr/ipv6_addr，不含端口）。
-       地址取自 recvfrom 的真实源（不信任报文内 ip_hint，防 IP 欺骗）。 */
-    char ep[INET6_ADDRSTRLEN + 8];
+    /* 源 IP（v4/v6 统一）：取自 recvfrom 的真实源（不信任报文内 ip_hint，防 IP 欺骗）。
+       - ip_only（纯 IP）专供 nft 放行集合元素（集合类型为 ipv4_addr/ipv6_addr，不含端口）；
+       - 跨服务对账标识 src_ip#seq[(uid=...)] 由 knockd_cid 生成，与 netd/bizd/login 同格式，
+         其中 src_ip 为真实客户端 IP，seq 为本进程本地序号（knockd 不开请求号到下游）。 */
     char ip_only[INET6_ADDRSTRLEN];
+    char cid[INET6_ADDRSTRLEN + 128];
+    char cid_ok[INET6_ADDRSTRLEN + 128];
+    char seqstr[24];
     const void *ap;
-    uint16_t sport_host;
+    int  srcfam = (int)src.ss_family;
+
     if (src.ss_family == AF_INET)
     {
         const struct sockaddr_in *a4 = (const struct sockaddr_in *)&src;
         inet_ntop(AF_INET, &a4->sin_addr, ip_only, sizeof(ip_only));
         ap = &a4->sin_addr;
-        sport_host = ntohs(a4->sin_port);
     }
     else if (src.ss_family == AF_INET6)
     {
         const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)&src;
         inet_ntop(AF_INET6, &a6->sin6_addr, ip_only, sizeof(ip_only));
         ap = &a6->sin6_addr;
-        sport_host = ntohs(a6->sin6_port);
     }
     else
     {
         return;  /* 非 IP 地址族，忽略 */
     }
-    q_net_addr_ntop((int)src.ss_family, ap, sport_host, ep, sizeof(ep));
+
+    /* 每包一个本地请求号，用于与 netd/bizd/login 同风格的对账标识（无锁原子递增） */
+    snprintf(seqstr, sizeof(seqstr), "%llu",
+             (unsigned long long)__sync_fetch_and_add(&g_knock_seq, 1));
 
     uint16_t port = 0, ttl = 0;
     if (q_spa_verify(g_spa_key, SPA_KEY_LEN, (const q_spa_pkt_t *)buf, (uint64_t)time(NULL), &port, &ttl) != 0)
     {
         /* 校验失败：网络层静默丢弃、不回包（抗扫描）；
            本地仅记 DEBUG，避免被扫描/伪造流量刷爆日志（需排障时把 log_level 调为 debug） */
-        QLOG_DEBUG(g_log, "SPA 校验失败 from=%s len=%zd", ep, n);
+        knockd_cid(srcfam, ap, NULL, seqstr, cid, sizeof(cid));
+        QLOG_DEBUG(g_log, "SPA 校验失败 cid=%s len=%zd", cid, n);
         return;
     }
 
@@ -211,13 +217,13 @@ static void on_knock(int fd, uint32_t events, void *ctx)
     open_door(kc->set, ip_only, ttl_s);
 
     /* 成功授权是安全关键事件，必须留审计痕迹（始终记录，不受级别过滤） */
-    char uidhex[65];
-    char amsg[160];
+    char amsg[256];
     char chain[512];
     uint8_t dig[32];
     char cur_hex[65];
-    spa_uid_hex(((const q_spa_pkt_t *)buf)->user_id, uidhex);
-    snprintf(amsg, sizeof(amsg), "remote=%s ttl=%u uid=%s", ep, ttl_s, uidhex);
+    knockd_cid(srcfam, ap, ((const q_spa_pkt_t *)buf)->user_id, seqstr,
+               cid_ok, sizeof(cid_ok));
+    snprintf(amsg, sizeof(amsg), "remote=%s ttl=%u", cid_ok, ttl_s);
 
     /* SM3 链式哈希（防篡改）：cur = SM3(prev || "SPA" || "open_ok" || msg) */
     int cl = snprintf(chain, sizeof(chain), "%s|SPA|open_ok|%s", g_audit_prev, amsg);

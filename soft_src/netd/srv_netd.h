@@ -102,23 +102,14 @@ typedef struct
 
 typedef struct netd_ctx netd_ctx_t;
 
-/* 源 IP 统一键：v4/v6 共用，作为【IP 维度限流】的哈希/比较键。
-   v4: fam=AF_INET, b[0..3]=网络序地址；v6: fam=AF_INET6, b[0..15]=全 16 字节。
-   wire 侧（q_chan_token_t.src_ip / IPC SRC_IP TLV）仍为 uint32 IPv4（§6.4 约定），
-   故另提供 netd_addr_v4() 取出网络序 v4 值（v6 时返回 0，保持旧语义）。 */
+/* 源 IP 统一键：v4/v6 共用，作为【IP 维度限流】的哈希/比较键，同时作为 Token 绑定地址
+   与 IPC SRC_IP TLV 的源（两者均已扩为 [1B 族][16B 地址]，支持 IPv6 溯源）。
+   v4: fam=AF_INET, b[0..3]=网络序地址；v6: fam=AF_INET6, b[0..15]=全 16 字节。 */
 typedef struct
 {
     sa_family_t fam;     /* AF_INET / AF_INET6；0 = 未初始化/空槽 */
     uint8_t     b[16];   /* 地址字节（v4 仅前 4 字节有效） */
 } netd_addr_t;
-
-static inline uint32_t netd_addr_v4(const netd_addr_t *a)
-{
-    if (a->fam != AF_INET)
-        return 0u;
-    return ((uint32_t)a->b[0] << 24) | ((uint32_t)a->b[1] << 16) |
-           ((uint32_t)a->b[2] << 8) | (uint32_t)a->b[3];
-}
 
 /* 每连接上下文：由 accept 循环分配，worker 线程独占（无需加锁） */
 typedef struct
@@ -134,6 +125,8 @@ typedef struct
     size_t         pkts;      /* 未认证阶段收包计数 */
     size_t         bytes;     /* 未认证阶段字节计数 */
     netd_ctx_t    *g;
+    char           req_id[32];  /* 本请求号：netd 每帧生成，经 IPC REQID TLV 透传 bizd/微服务，
+                                   与 bizd->微服务的 JSON "id" 一致，整条链 src_ip#id 相同可关联 */
 } netd_conn_t;
 
 /* 把连接端点格式化为 "ip:port"（port 转本机序打印），供日志标识具体连接。
@@ -145,6 +138,39 @@ static inline const char *netd_conn_ntop(const netd_conn_t *c, char *buf, size_t
         return "?";
     return q_net_addr_ntop((int)c->src_addr.fam, c->src_addr.b,
                            ntohs(c->src_port), buf, buflen);
+}
+
+/* 跨服务对账标识：src_ip#req_id；已登录（user_id 非全 0）附 (uid=<64hex>)。
+   与 bizd_cid / login_req_cid 同格式（src_ip 取真实客户端 IP，netd 经 accept 可得，
+   不同于 bizd/login 只能从 IPC/JSON 取），整条链 grep 同一 src_ip#id 即可关联。
+   返回 buf；c==NULL 或缓冲不足回传 "?"。req_id 为空时退化为纯 ip（握手阶段尚无请求号）。 */
+static inline const char *netd_cid(const netd_conn_t *c, char *buf, size_t buflen)
+{
+    char        ep[INET6_ADDRSTRLEN + 8];
+    const char *ip;
+    size_t      i;
+    int         nz = 0;
+
+    if (!c || buflen < INET6_ADDRSTRLEN + 128)
+        return "?";
+    ip = q_net_addr_ntop((int)c->src_addr.fam, c->src_addr.b, 0, ep, sizeof(ep));
+    if (c->req_id[0])
+    {
+        for (i = 0u; i < 32u; i++)
+            if (c->token.user_id[i]) { nz = 1; break; }
+        if (nz)
+        {
+            char hex[65];
+            for (i = 0u; i < 32u; i++)
+                snprintf(hex + i * 2u, 3u, "%02x", (unsigned)c->token.user_id[i]);
+            snprintf(buf, buflen, "%s#%s(uid=%s)", ip, c->req_id, hex);
+        }
+        else
+            snprintf(buf, buflen, "%s#%s", ip, c->req_id);
+    }
+    else
+        snprintf(buf, buflen, "%s", ip);
+    return buf;
 }
 
 struct netd_ctx
@@ -195,6 +221,7 @@ uint64_t now_sec(void);
 void     put_be16(uint8_t *p, uint16_t v);
 void     put_be32(uint8_t *p, uint32_t v);
 int      netd_set_io_timeout(q_fd_t fd, int sec);
+void     netd_next_req_id(char *buf, size_t cap);   /* 生成全局单调递增请求号（复用 g_netd.lock） */
 
 /* ===================== 限流（netd_limit.c） ===================== */
 int  conn_acquire(netd_ctx_t *g, const netd_addr_t *src);
@@ -205,6 +232,7 @@ void fail_note(netd_ctx_t *g, const netd_addr_t *src);
 int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
                 const uint8_t *body, size_t blen,
                 const uint8_t chanid[32], const uint8_t userid[32],
+                const char *reqid,
                 uint32_t *result, uint8_t *out, size_t outcap, size_t *out_len);
 
 /* ===================== 业务处理 / 登录（netd_handler.c） ===================== */

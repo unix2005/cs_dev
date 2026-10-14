@@ -58,6 +58,46 @@ typedef struct
     const char *set;          /* 指向 g_cfg 中的集合名（运行期填充） */
 } knock_ctx_t;
 
+/* 跨服务对账标识：src_ip#seq；SPA 报文携带 user_id（SM3）时附 (uid=<64hex>)。
+   与 netd/bizd/login 同格式（src_ip 取 recvfrom 真实客户端 IP）；
+   注意 knockd 是“开门”网关、不向 netd/bizd/微服务透传请求号，故 seq 为本进程本地序号，
+   跨服务关联以真实 src_ip 为准（同一客户端 IP 在四服务日志中完全一致）。
+   返回 buf；buf 空或不足回传 "?"。 */
+static inline const char *knockd_cid(int fam, const void *addr,
+                                     const uint8_t uid[32], const char *seq,
+                                     char *buf, size_t buflen)
+{
+    char        ip[INET6_ADDRSTRLEN];
+    size_t      i;
+    int         nz = 0;
+
+    if (!buf || buflen == 0u)
+        return "?";
+    if (fam == AF_INET6)
+        inet_ntop(AF_INET6, addr, ip, sizeof(ip));
+    else
+        inet_ntop(AF_INET, addr, ip, sizeof(ip));
+
+    if (seq && *seq)
+    {
+        if (uid)
+            for (i = 0u; i < 32u; i++)
+                if (uid[i]) { nz = 1; break; }
+        if (nz)
+        {
+            char hex[65];
+            for (i = 0u; i < 32u; i++)
+                snprintf(hex + i * 2u, 3u, "%02x", (unsigned)uid[i]);
+            snprintf(buf, buflen, "%s#%s(uid=%s)", ip, seq, hex);
+        }
+        else
+            snprintf(buf, buflen, "%s#%s", ip, seq);
+    }
+    else
+        snprintf(buf, buflen, "%s", ip);
+    return buf;
+}
+
 #ifdef __cplusplus
 }
 #endif

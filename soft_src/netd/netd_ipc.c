@@ -22,15 +22,31 @@ static int ipc_read_exact(int fd, uint8_t *buf, size_t len)
     return 0;
 }
 
-/* 请求：  [len:4][TLV(CMD)][TLV(BODY)][TLV(SRC_IP)][TLV(CHANID)][TLV(USERID)] */
+/* 全局请求号计数器：netd 为客户端入站侧，由本进程统一生成，
+   经 IPC REQID TLV 透传到 bizd -> 微服务，保证整条链 src_ip#id 一致。
+   复用 g_netd.lock（已初始化，原用于配额计数），避免新增锁。 */
+void netd_next_req_id(char *buf, size_t cap)
+{
+    unsigned long long n;
+
+    pthread_mutex_lock(&g_netd.lock);
+    static uint64_t g_netd_req_seq = 0;
+    n = (unsigned long long)(++g_netd_req_seq);
+    pthread_mutex_unlock(&g_netd.lock);
+
+    if (buf && cap)
+        snprintf(buf, cap, "%llu", n);
+}
+
+/* 请求：  [len:4][TLV(CMD)][TLV(BODY)][TLV(SRC_IP)][TLV(CHANID)][TLV(USERID)][TLV(REQID)] */
 static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
                             const uint8_t *body, size_t blen,
                             const netd_addr_t *src, const uint8_t chanid[32],
-                            const uint8_t userid[32])
+                            const uint8_t userid[32], const char *reqid)
 {
     size_t off = Q_IPC_LENPFX, n = 0u;
-    uint8_t u16[2], ipb[4];
-    uint32_t v4 = netd_addr_v4(src);     /* wire SRC_IP 仍是 uint32 IPv4（§6.4） */
+    uint8_t u16[2], ipb[17];
+    uint8_t fam = (src->fam == AF_INET6) ? 6u : 4u;
 
     put_be16(u16, cmd);
     if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_CMD, u16, 2, &n) == 0)
@@ -43,8 +59,11 @@ static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
             off += n;
     }
 
-    memcpy(ipb, &v4, 4);   /* 保持网络序字节序 */
-    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_SRCIP, ipb, 4, &n) == 0)
+    /* SRCIP 扩为 [1B 族][16B 地址]（IPv4 时地址占低 4 字节），支持 IPv6 溯源 */
+    memset(ipb, 0, sizeof(ipb));
+    ipb[0] = fam;
+    memcpy(ipb + 1u, src->b, (fam == 6u) ? 16u : 4u);
+    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_SRCIP, ipb, 17, &n) == 0)
         off += n;
 
     if (chanid && q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_CHANID,
@@ -54,6 +73,15 @@ static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
     if (userid && q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_USERID,
                                      userid, 32, &n) == 0)
         off += n;
+
+    if (reqid && reqid[0])
+    {
+        size_t rl = strlen(reqid);
+        if (rl > 0u && rl <= (size_t)UINT16_MAX &&
+            q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_REQID,
+                               (const uint8_t *)reqid, (uint16_t)rl, &n) == 0)
+            off += n;
+    }
 
     put_be32(out, (uint32_t)(off - Q_IPC_LENPFX));
     return off;
@@ -66,6 +94,7 @@ static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
 int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
                 const uint8_t *body, size_t blen,
                 const uint8_t chanid[32], const uint8_t userid[32],
+                const char *reqid,
                 uint32_t *result, uint8_t *out, size_t outcap, size_t *out_len)
 {
     uint8_t  req[Q_IPC_LENPFX + 3u * (4u + Q_IPC_TLV_MAX) + 64u];
@@ -92,7 +121,7 @@ int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
     }
 
     reqlen = ipc_build_req(req, sizeof(req), cmd, body, blen, src,
-                           chanid, userid);
+                           chanid, userid, reqid);
 
     if (q_ipc_connect(g_cfg.ipc_path, &fd) != 0)
     {
