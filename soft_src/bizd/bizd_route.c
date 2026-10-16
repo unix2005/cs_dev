@@ -17,6 +17,7 @@ static const bizd_ep_t *route_of(uint16_t cmd)
     case Q_CHAN_CMD_LOGIN:
     case Q_CHAN_CMD_HEARTBEAT:
     case Q_CHAN_CMD_LOGOUT:
+    case Q_CHAN_CMD_SALT_QUERY:
         return &g_bcfg.ep_auth;
     case Q_CHAN_CMD_BIZ_QUERY:
     case Q_CHAN_CMD_BIZ_UPDATE:

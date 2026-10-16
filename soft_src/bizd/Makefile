@@ -21,11 +21,18 @@ QLIBS  = $(call ld_group, \
          $(LIB)/libqsec.a $(LIB)/libqcrypto.a \
          $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a \
          $(LIB)/libqnet.a)
-# 系统 libxml2（q_xcfg 依赖）；cJSON 为本地 vendored（$(SOFT_HOME)/cJSON）
+
+# cJSON 为本地 vendored（$(SOFT_HOME)/cJSON）。
+# 【编译期】头文件路径必须走 SOFT_INCL —— Makefile.inc 会把 SOFT_INCL 展开为 -I 加入 CFLAGS；
+# 原先误把 -I$(SOFT_HOME)/cJSON/include 写在 LIBS 里，而 LIBS 只在链接期生效，
+# 导致 include_xml.h -> cJSON.h 在编译期找不到（fatal error: 'cJSON.h' file not found）。
+SOFT_INCL = . $(SOFT_HOME)/cJSON/include
+
+# 链接期：系统 libxml2（q_xcfg 依赖）+ Tongsuo + vendored cJSON
 LIBS   = $(QLIBS) $(LIB_PTHREAD) -lseccomp -lxml2 \
-         -I$(SOFT_HOME)/cJSON/include \
          -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64 \
          -L$(SOFT_HOME)/cJSON/lib -lcjson -Wl,-rpath,$(SOFT_HOME)/cJSON/lib
-# 注：DB 客户端库待接入后在此追加；seccomp 待实现后追加 $(LIB_SECCOMP)
+# 注：DB 客户端库待接入后在此追加；seccomp 沙箱已移入共享库 libqcommon，
+#     -lseccomp 由该库符号拉取（Linux 专有库；macOS 无 libseccomp，链接期会失败，属平台限制）
 
 include ../../include/Makefile.inc

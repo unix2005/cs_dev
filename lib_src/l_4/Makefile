@@ -2,15 +2,13 @@ all: fundmental_lib
 
 fundmental_lib:
 	@echo
-	@echo "    Begin make fundmental library ..."
+	@echo "    Begin make l_4 library ..."
 	@echo
-#	(cd q_log; make)
-#	(cd q_mem; make)
+	(cd q_clientcomm; make)
 	@echo
-	@echo "    Make fundmental library success !!!"
+	@echo "    Make l_4 library success !!!"
 
 clean:
-#	(cd q_log; make clean)
-#	(cd q_mem; make clean)
+	(cd q_clientcomm; make clean)
 	@echo
-	@echo "    Clean fundmental library compiled file okey ..."
+	@echo "    Clean l_4 library compiled file okey ..."

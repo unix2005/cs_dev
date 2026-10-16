@@ -2,7 +2,7 @@
 
 本文档为 **cs\_dev 统一开发环境** 专属 AI 编程约束规则，所有 AI 代码生成、修改、编译、调试、重构行为必须严格遵守本目录规范、编码规范、工程规范，适配C/S架构安全项目开发（**等保三级 + 国密 + 公网暴露护网场景**），禁止随意创建、修改、移动工程目录文件，保证项目结构统一、可编译、可跨平台部署、符合护网安全规范。
 
-> **技术栈基线（强制）**：服务端 纯C + Linux + 自研 epoll reactor；客户端 GTK4 + 纯C；密码库 **Tongsuo（铜锁）**；算法 **SM2/SM3/SM4**；通信协议 自研私有协议。
+> **技术栈基线（强制）**：服务端 纯C + Linux + 自研 reactor；客户端 纯C通信内核（三端共享）+ 多端UI外壳（Windows WinUI3 / Linux GTK4 / macOS 原生）；密码库 **Tongsuo（铜锁）**；算法 **SM2/SM3/SM4**；通信协议 自研私有协议。
 > **已废弃选型（禁止使用）**：Qt（C++）、libuv、LibreSSL、RSA2048、AES\-GCM。
 
 ## 一、工程目录绝对规范（强制遵守）
@@ -33,8 +33,8 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
 
     - **knockd/**：SPA 单包授权进程（UDP 包校验 + nftables 动态放行，libnftables 直连、IPv4/IPv6 双栈监听），代码量严格控制在 **500 行以内**，仅授予 `CAP_NET_ADMIN`
     - **netd/**：协议进程（SM2 密钥协商、SM4\-GCM 解包、字段校验、限流），公网暴露，**非 root + chroot + seccomp，无 DB 凭据、无文件写权限**
-    - **bizd/**：业务进程（业务逻辑、数据库、权限、审计、视频流调度），持有 DB 凭据，**仅监听 Unix Socket，不直接暴露公网**
-    - **client/**：GTK4 客户端业务代码（UI 与纯C通信内核解耦，UI 操作只允许主线程）
+    - **bizd/**：可信路由转发进程（netd 已解密 TLV → JSON over TCP 转发下游微服务，DB / 业务逻辑 / 审计在下游），不持有 DB 凭据，**仅监听 Unix Socket，不直接暴露公网**
+    - **lib\_src/l\_4/q\_clientcomm/**：跨三端共享的纯C客户端通信内核库（封装 q\_chan/q\_net/q\_codec/q\_crypto，对外暴露 C ABI 门面，UI 绝不碰 q\_fd\_t/q\_chan\_t）；产物 libqclientcomm.a / Windows qcomm.lib+dll；**win\_client/**（WinUI3）、**gtk\_vms\_*/**（GTK4）、**macos\_vms\_*/**（原生）为各端 UI 外壳，UI 操作只允许主线程
 
 ## 二、AI 目录操作强制约束
 
@@ -96,12 +96,14 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
     | `l_1/q_util/` | `libqutil` | 通用工具：字节序、hex、base32、时间、配置读取 |
     | `l_1/q_rand/` | `libqrand` | 密码学安全随机源 |
     | `l_1/q_crypto/` | `libqcrypto` | 国密原语封装（SM2 签名/密钥交换、SM3 哈希/KDF/HMAC、SM4\-GCM、PBKDF2\-SM3、HMAC\-SM3 TOTP），基于 Tongsuo，**禁止自研算法** |
+| `l_1/q_reactor/` | `libqreactor` | 事件循环（epoll/kqueue/WSAPoll 后端）+ 有界线程池 + timerfd 定时器（**已从 q_net 下沉到 l_1**，供 q_net 复用） |
+| `l_1/q_xcfg/` | `libqxcfg` | XML 配置读取（基于 libxml2 XPath），供守护进程读配置 |
 
     **l\_2 能力层（只能调用 l\_1）**
 
     | 模块 | 产出库 | 职责 |
     |---|---|---|
-    | `l_2/q_net/` | `libqnet` | socket 跨平台封装、**epoll ET reactor**、timerfd 定时器、有界线程池、客户端阻塞收发（**禁止引入 libuv**） |
+    | `l_2/q_net/` | `libqnet` | socket 跨平台封装、客户端阻塞收发、UDP、地址解析（**禁止引入 libuv**）；事件循环与有界线程池复用 `l_1/q_reactor` |
     | `l_2/q_ipc/` | `libqipc` | Unix Domain Socket 封装（netd 与 bizd 进程间通信） |
     | `l_2/q_codec/` | `libqcodec` | 帧头（pkt\_hdr）解析/序列化、TLV 编解码、字段校验表（**仅做结构编解码，不做加解密**） |
     | `l_2/q_sec/` | `libqsec` | 密钥派生（SM3\-KDF）、防重放（seq 滑动窗口）、PoW、限流计数器 |
@@ -113,7 +115,9 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
     | `l_3/q_chan/` | `libqchan` | **已合并原 `l_3/q_proto`**（§3.3.3 例外登记：同层禁止互调，故并入单一 l\_3 模块）：安全通道（SM2 协商时序 + SM4\-GCM 收发 + AAD 组装 + 通道绑定）+ 协议语义（连接状态机、指令分发、会话 / Token 绑定）；链接 `-lqcodec -lqsec -lqnet -lqcrypto -lqrand -lqmem -lqlog` |
     | `l_3/q_spa/` | `libqspa` | SPA 单包授权（报文构造 / 解析 / 校验） |
 
-2. **soft\_src 开发规范**：仅开发上层业务逻辑，包含服务端业务处理、**客户端 GTK4 UI 逻辑**、Token会话管理、视频流调度、权限校验等核心业务，调用lib\_src编译后的库能力，禁止重复编写底层工具逻辑
+    > `l_4/` 目录已建立（仅 Makefile），供未来跨 l_3 共享能力下沉，当前未放模块。
+
+2. **soft\_src 开发规范**：仅开发上层业务逻辑，包含服务端业务处理、**客户端各端 UI 逻辑（WinUI3 / GTK4 / macOS 原生）**、Token会话管理、视频流调度、权限校验等核心业务，调用lib\_src编译后的库能力，禁止重复编写底层工具逻辑
 
 3. **open\_src 开发规范**：仅做开源组件编译、适配、裁剪，禁止修改开源核心算法，所有自定义适配代码隔离存放，便于版本升级、漏洞更新
 
@@ -151,10 +155,10 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
 
 ```mermaid
 graph TD
-    APP["soft_src 业务层<br/>knockd / netd / bizd / client"]
+    APP["soft_src 业务层<br/>knockd / netd / bizd / 各端外壳（win_client / gtk_* / macos_*）"]
     L3["l_3 协议层<br/>q_chan / q_spa"]
     L2["l_2 能力层<br/>q_net / q_ipc / q_codec / q_sec"]
-    L1["l_1 基础层<br/>q_log / q_mem / q_ds / q_util / q_rand / q_crypto"]
+    L1["l_1 基础层<br/>q_log / q_mem / q_ds / q_util / q_rand / q_crypto / q_reactor / q_xcfg"]
 
     APP --> L3
     APP --> L2
@@ -236,9 +240,9 @@ include ../../../include/Makefile.inc     # 或 include ${SOFT_HOME}/include/Mak
 
 6. **安全编译选项（强制）**：`-O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now -Wl,-z,noexecstack -ftrapv -Wformat -Werror=format-security -Wconversion`
 
-7. **依赖库约束**：密码能力统一链接 **Tongsuo（铜锁）**；客户端 UI 统一使用 **GTK4**（`GtkColumnView` / `GtkNotebook` / `GtkDrawingArea` + cairo 自绘图表），**禁止使用 Qt（C++）、libuv、LibreSSL**；Windows 库产物至 dll/，Linux/macOS 库产物至 lib/，可执行文件统一至 bin/
+7. **依赖库约束**：密码能力统一链接 **Tongsuo（铜锁）**；客户端 UI：Windows 用 **WinUI3**、Linux 用 **GTK4**（`GtkColumnView` / `GtkNotebook` / `GtkDrawingArea` + cairo 自绘图表）、macOS 用 **原生（AppKit/SwiftUI）**；三者共享纯C通信内核（封装 q\_chan/q\_net/q\_codec/q\_crypto，对外 C ABI）；**禁止使用 Qt（C++）、libuv、LibreSSL**；Windows 库产物至 dll/，Linux/macOS 库产物至 lib/，可执行文件统一至 bin/
 
-8. **客户端线程约束**：GTK4 所有 UI 操作只允许主线程执行，网络/解码线程一律通过 `g_idle_add()` / `g_main_context_invoke()` 投递；无 GPU 环境需支持 `GSK_RENDERER=cairo` 软件渲染
+8. **客户端线程约束**：各端 UI 操作只允许主线程执行——GTK4 用 `g_idle_add()`/`g_main_context_invoke()`、WinUI3 用 `DispatcherQueue.TryEnqueue`、macOS 用 `DispatchQueue.main.async` 投回；网络/解码线程一律投回主线程；Linux 无 GPU 环境需支持 `GSK_RENDERER=cairo` 软件渲染
 
 9. **q 库独立产物与逐级链接（强制）**：每个 `q_xxx` 模块独立产出 **`libqxxx.a`**（`libq` + 模块名，**禁止出现下划线**，如 `libqlog.a` / `libqnet.a` / `libqchan.a`），Linux/macOS → `lib/`，Windows → `dll/`；**不得按层合并成单一库**；链接顺序为「本模块 → l\_3 → l\_2 → l\_1」，依赖在本模块 Makefile 中**逐级显式 `-lqxxx` 添加**；每次构建前执行 `shell/check_layer.sh`，违规即中止
 
@@ -258,7 +262,7 @@ include ../../../include/Makefile.inc     # 或 include ${SOFT_HOME}/include/Mak
 
 5. 输出代码同时附带简要说明：文件路径、用途、编译方式、适配平台，方便用户落地
 
-6. **技术栈红线**：生成任何代码前必须确认技术栈为「纯C + Tongsuo 国密 + GTK4 + 自研 epoll reactor + 自研私有协议」；若需求描述或既有文档中出现 **Qt、libuv、LibreSSL、RSA2048、AES\-GCM** 等已废弃选型，必须主动指出并按本规则纠正，不得沿用
+6. **技术栈红线**：生成任何代码前必须确认技术栈为「纯C 通信内核（三端共享）+ 多端UI（WinUI3 / GTK4 / macOS 原生）+ Tongsuo 国密 + 自研 reactor + 自研私有协议」；若需求描述或既有文档中出现 **Qt、libuv、LibreSSL、RSA2048、AES\-GCM** 等已废弃选型，必须主动指出并按本规则纠正，不得沿用
 
 7. **安全边界红线**：不得将安全寄托于"协议私有不公开"或"客户端混淆"；所有安全控制必须由**服务端强制**执行，设计上需假定协议格式与客户端二进制已完全泄露
 

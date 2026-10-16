@@ -16,6 +16,9 @@ int q_chan_sm_on_cmd(q_chan_st_t *st, uint16_t cmd, int login_ok)
     {
     case Q_CHAN_CMD_HELLO:
         return q_chan_sm_transition(st, Q_CHAN_EV_HELLO);
+    case Q_CHAN_CMD_SALT_QUERY:
+        /* 登录前只读查询：不改变认证态，保持在 KEYED，后续方可继续 LOGIN */
+        return q_chan_sm_transition(st, Q_CHAN_EV_PREAUTH_CMD);
     case Q_CHAN_CMD_LOGIN:
         return q_chan_sm_transition(st, login_ok ? Q_CHAN_EV_LOGIN_OK : Q_CHAN_EV_LOGIN_FAIL);
     case Q_CHAN_CMD_HEARTBEAT:

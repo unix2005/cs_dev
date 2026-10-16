@@ -43,6 +43,33 @@ static char *to_hex(const uint8_t *b, size_t len)
     return s;
 }
 
+/* hex 字符 -> 值（非法返回 -1） */
+static int bizd_hexval(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* hex 字符串 -> 原始字节；out 容量需 >= hlen/2；返回字节数，失败 -1 */
+static int bizd_from_hex(const char *hex, size_t hlen, uint8_t *out, size_t outcap)
+{
+    size_t i, n = hlen / 2u;
+
+    if (hlen % 2u != 0u || n > outcap)
+        return -1;
+    for (i = 0u; i < n; i++)
+    {
+        int hi = bizd_hexval(hex[2u * i]);
+        int lo = bizd_hexval(hex[2u * i + 1u]);
+        if (hi < 0 || lo < 0)
+            return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return (int)n;
+}
+
 /* 客户端源地址（v4/v6 统一）-> 字符串，写入 JSON 的 ctx.src_ip */
 static void add_ipstr(cJSON *o, const char *k, uint8_t fam, const uint8_t *addr)
 {
@@ -201,6 +228,111 @@ out:
     return rc;
 }
 
+/*
+ * SALT_QUERY 处理（登录前拉取账号 salt，方案A）：
+ *   请求体 TLV(USERNAME) -> JSON params {username} -> 下游 auth 微服务；
+ *   响应 JSON {result,data:{salt:"<hex>"}} -> 转原始字节装入 Q_IPC_T_BODY 回传
+ *   （客户端 TLV-only，不解析 JSON）。
+ */
+static int bizd_hnd_salt(uint16_t cmd, const uint8_t *body, size_t body_len,
+                         uint8_t *out, size_t outcap, size_t *out_len, void *ud)
+{
+    bizd_udata_t *u = (bizd_udata_t *)ud;
+    bizd_conn_t  *c;
+    cJSON        *root = NULL, *params = NULL, *rsp_json = NULL;
+    cJSON        *rj = NULL, *data = NULL, *salt_obj = NULL;
+    char         *req = NULL, *rsp = NULL;
+    size_t        off = 0u, n = 0u;
+    uint8_t       rb[4];
+    int           rc = -1;
+
+    if (!u || !u->g || !u->c)
+        return -1;
+    c = u->c;
+    if (c->req_id[0] == '\0')
+        next_req_id(c->req_id, sizeof(c->req_id));
+
+    root = cJSON_CreateObject();
+    if (!root)
+        goto out;
+    cJSON_AddNumberToObject(root, "ver", 1);
+    cJSON_AddStringToObject(root, "id", c->req_id);
+    cJSON_AddNumberToObject(root, "cmd", (double)cmd);
+    params = body_to_params(body, body_len);   /* USERNAME TLV -> {"username":"..."} */
+    if (params)
+        cJSON_AddItemToObject(root, "params", params);
+
+    req = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    root = NULL;
+    if (!req)
+        goto out;
+
+    if (bizd_route_call(cmd, req, &rsp) != 0 || !rsp)
+        goto out;
+
+    rsp_json = cJSON_Parse(rsp);
+    if (!rsp_json)
+        goto out;
+
+    rj = cJSON_GetObjectItem(rsp_json, "result");
+    if (!rj || rj->type != cJSON_Number || (int)(rj->valuedouble) != (int)Q_IPC_R_OK)
+    {
+        int result = rj ? (int)(rj->valuedouble) : (int)Q_IPC_R_UNAVAILABLE;
+        bizd_put_be32(rb, (uint32_t)result);
+        if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
+        {
+            off += n;
+            *out_len = off;
+        }
+        rc = 0;
+        goto out_json;
+    }
+
+    data     = cJSON_GetObjectItem(rsp_json, "data");
+    salt_obj = data ? cJSON_GetObjectItem(data, "salt") : NULL;
+    if (salt_obj && salt_obj->type == cJSON_String && salt_obj->valuestring)
+    {
+        const char *hex  = salt_obj->valuestring;
+        size_t      hlen = strlen(hex);
+        uint8_t    *raw  = (uint8_t *)malloc(hlen / 2u + 1u);
+        int         slen = -1;
+
+        if (raw)
+        {
+            slen = bizd_from_hex(hex, hlen, raw, hlen / 2u + 1u);
+            if (slen > 0)
+            {
+                bizd_put_be32(rb, (uint32_t)Q_IPC_R_OK);
+                if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
+                {
+                    off += n;
+                    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_BODY,
+                                           raw, (uint16_t)slen, &n) == 0)
+                    {
+                        off += n;
+                        *out_len = off;
+                        rc = 0;
+                    }
+                }
+            }
+            free(raw);
+        }
+    }
+
+out_json:
+    if (rsp_json)
+        cJSON_Delete(rsp_json);
+out:
+    if (req)
+        free(req);
+    if (rsp)
+        free(rsp);
+    if (root)
+        cJSON_Delete(root);
+    return rc;
+}
+
 int bizd_disp_init(q_chan_disp_t *d, void *ud)
 {
     static const uint16_t cmds[] = {
@@ -218,5 +350,8 @@ int bizd_disp_init(q_chan_disp_t *d, void *ud)
         if (q_chan_disp_register(d, cmds[i], bizd_hnd, ud) != 0)
             return -1;
     }
+    /* SALT_QUERY 需要专用 handler：把下游 salt hex 转原始字节装入 BODY（客户端 TLV-only） */
+    if (q_chan_disp_register(d, Q_CHAN_CMD_SALT_QUERY, bizd_hnd_salt, ud) != 0)
+        return -1;
     return 0;
 }

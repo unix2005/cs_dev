@@ -76,6 +76,7 @@ extern "C"
 #define Q_CHAN_CMD_HELLO 0x0001u
 #define Q_CHAN_CMD_KEY_EXCHANGE 0x0002u
 #define Q_CHAN_CMD_LOGIN 0x0003u
+#define Q_CHAN_CMD_SALT_QUERY 0x0004u /* 登录前拉取账号 salt（方案A，防彩虹表） */
 #define Q_CHAN_CMD_HEARTBEAT 0x0010u
 #define Q_CHAN_CMD_BIZ_QUERY 0x0020u
 #define Q_CHAN_CMD_BIZ_UPDATE 0x0021u
@@ -99,6 +100,7 @@ extern "C"
         Q_CHAN_EV_LOGIN_OK,         /* 登录校验通过 */
         Q_CHAN_EV_LOGIN_FAIL,       /* 登录校验失败 */
         Q_CHAN_EV_AUTH_CMD,         /* 已认证态业务命令 */
+        Q_CHAN_EV_PREAUTH_CMD,      /* 未认证态只读查询（如 SALT_QUERY），不改变认证态 */
         Q_CHAN_EV_TIMEOUT           /* 超时 / 错误 */
     } q_chan_ev_t;
 
@@ -106,7 +108,7 @@ extern "C"
     int q_chan_sm_transition(q_chan_st_t *st, q_chan_ev_t ev);
 
     /* 白名单：当前状态下是否允许收到该 cmd；允许返回 1，禁止返回 0。
-   未认证态（NEW/HELLO/KEYED）仅允许 HELLO/LOGIN（KEY_EXCHANGE 由 q_chan_handshake 以
+   未认证态（NEW/HELLO/KEYED）仅允许 HELLO/LOGIN/SALT_QUERY（KEY_EXCHANGE 由 q_chan_handshake 以
    带外方式完成，不占用应用层指令白名单）；AUTHED 仅允许业务指令。 */
     int q_chan_sm_cmd_allowed(q_chan_st_t st, uint16_t cmd);
 

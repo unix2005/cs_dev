@@ -14,8 +14,9 @@ int q_chan_sm_cmd_allowed(q_chan_st_t st, uint16_t cmd)
         /* 密钥交换前仅允许 HELLO（KEY_EXCHANGE 由 q_chan_handshake 带外完成） */
         return (cmd == Q_CHAN_CMD_HELLO) ? 1 : 0;
     case Q_CHAN_ST_KEYED:
-        /* 已协商密钥、未登录：允许 HELLO 与 LOGIN */
-        return (cmd == Q_CHAN_CMD_HELLO || cmd == Q_CHAN_CMD_LOGIN) ? 1 : 0;
+        /* 已协商密钥、未登录：允许 HELLO / LOGIN / SALT_QUERY（登录前拉 salt） */
+        return (cmd == Q_CHAN_CMD_HELLO || cmd == Q_CHAN_CMD_LOGIN ||
+                cmd == Q_CHAN_CMD_SALT_QUERY) ? 1 : 0;
     case Q_CHAN_ST_AUTHED:
         /* 已认证：仅业务指令 */
         return (cmd == Q_CHAN_CMD_HEARTBEAT || cmd == Q_CHAN_CMD_BIZ_QUERY || cmd == Q_CHAN_CMD_BIZ_UPDATE ||

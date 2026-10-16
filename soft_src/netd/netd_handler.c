@@ -119,6 +119,9 @@ int netd_disp_init(q_chan_disp_t *d, void *ud)
         return -1;
     if (q_chan_disp_register(d, Q_CHAN_CMD_LOGOUT,      hnd_logout,    ud) != 0)
         return -1;
+    /* SALT_QUERY：登录前拉取账号 salt（方案A），转发 bizd 即可（与业务转发同构） */
+    if (q_chan_disp_register(d, Q_CHAN_CMD_SALT_QUERY,  hnd_biz,       ud) != 0)
+        return -1;
 
     return 0;
 }

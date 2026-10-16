@@ -46,6 +46,22 @@ LibreSSL 是 OpenBSD 的精简分支，路线图中从未包含国密算法，�
 
 ---
 
+### 0.4 工程现状同步（2026-10）
+
+本方案制定后，工程已落地以下内容（与正文各节保持一致，此处仅作变更索引）：
+
+| # | 已实现 / 变更 | 落点 |
+|---|---|---|
+| 1 | **netd 已实现并拆分**：单文件 ~1134 行拆为 `srv_netd.h + main.c + netd_config/netd_util/netd_limit/netd_ipc/netd_handler/netd_srv`（共 8 文件），零告警构建通过，冒烟验证可监听并进入事件循环 | `soft_src/netd/` |
+| 2 | **bizd 已实现（路由转发定位）**：接收 netd 可信 TLV，解码为 JSON over TCP 转发下游微服务（另一项目）；DB / 业务逻辑在下游 | `soft_src/bizd/` |
+| 3 | **netd↔bizd wire 契约独立成头**：TLV tag / 结果码 / 分帧 / 下游 JSON 格式统一在 `include/include_ipc_proto.h`，两端共用，消除协议漂移 | `include/` |
+| 4 | **跨平台 socket 封装落地**：`q_fd_t`（Win64 下 uint64_t 原样承载 SOCKET）、`Q_SOCK_CLOSE`、`Q_FD_SET_NONBLOCK(形参 q_fd_t)`；reactor 后端已支持 epoll / kqueue / WSAPoll | `include/include_net.h`、`lib_src/l_1/q_reactor` |
+| 5 | **新增库**：`l_1/q_xcfg`（XML 配置，libqxcfg，依赖 libxml2）、`l_1/q_reactor`（事件循环 + 有界线程池，libqreactor）；原 `q_net` 复用之，不再自带 reactor | `lib_src/l_1/` |
+| 6 | **l_4 层预留**：`lib_src/l_4/` 目录已建立（仅 Makefile），供未来跨 l_3 共享能力下沉，当前未放模块 | `lib_src/l_4/` |
+| 7 | **bizd 定位按用户裁定**：为「可信路由转发」而非业务进程本体；业务 / DB / 审计在下游微服务，bizd 不持有 DB 凭据，仍满足 §1.2 安全基线 | §1.2 注 |
+| 8 | **已知缺口（待办）**：PoW（§6.5）、下游微服务联调、会话 / 限流横向扩容（Redis）、q_chan 帧长上限（防御 16MB 预分配） | 代码注释 |
+
+---
 ## 1. 总体架构
 
 ### 1.1 部署拓扑
@@ -76,27 +92,28 @@ graph TB
 |---|---|---|---|
 | **knockd** | SPA 校验 + 防火墙放行 | 仅 `CAP_NET_ADMIN` | UDP 单端口（最高危，代码量最小） |
 | **netd** | SM2 协商、SM4-GCM 解包、字段校验、限流 | 非 root、chroot、seccomp、无文件写权限 | TCP 业务端口（公网） |
-| **bizd** | 业务逻辑、数据库、权限、审计 | 持有 DB 凭据 | 仅 Unix Socket（不对外） |
+| **bizd** | 可信路由转发：netd 已解密 TLV → JSON over TCP 转发下游微服务（另一项目）；DB / 业务逻辑 / 审计在下游 | 不持有 DB 凭据 | 仅 Unix Socket（不对外） |
 
-**核心价值**：即使 netd 被打穿，攻击者也只能得到一个无 DB 凭据、无文件写权限、syscall 受限的空壳进程。
+**核心价值**：即使 netd 被打穿，攻击者也只能得到一个无 DB 凭据、无文件写权限、syscall 受限的空壳进程。bizd 已按用户裁定改为「可信路由转发」角色，自身不持有 DB 凭据、不暴露公网，该安全基线不变。
 
 ### 1.3 目录映射（对齐 cs_dev 规范）
 
 ```
 lib_src/
-  net/        socket 跨平台封装、epoll reactor、定时器、线程池、客户端收发
-  crypto/     国密封装（SM2/SM3/SM4，基于 Tongsuo）、KDF、OTP、安全清零
-  proto/      帧编解码、TLV、状态机、防重放
-  ipc/        Unix Domain Socket 封装
-  util/       日志、配置、限流、内存池、安全清零
+  l_1/   基础层：q_log q_mem q_ds q_util q_rand q_crypto q_reactor(新增) q_xcfg(新增)
+  l_2/   能力层：q_net q_ipc q_codec q_sec
+  l_3/   协议层：q_chan(合并原 q_proto) q_spa
+  l_4/   客户端通信内核层：q_clientcomm（跨三端纯C通信内核，封装 q_chan/q_net/q_codec/q_crypto 的 C ABI 门面；产物 libqclientcomm.a / Windows qcomm.dll；详见《客户端通信接口与开发指南.md》）
 soft_src/
   knockd/     SPA 授权进程
-  netd/       协议进程
-  bizd/       业务进程（会话、权限、审计、业务）
-  client/     GTK4 客户端（UI 与通信内核解耦）
+  netd/       协议进程（8 文件：srv_netd.h+main+config/util/limit/ipc/handler/srv）
+  bizd/       路由转发进程（7 文件：srv_bizd.h+main+config/util/route/handler/srv）
+  win_client/   Windows 端 WinUI3 外壳（C#/C++ WinRT，P/Invoke 或直链 qcomm）
+  gtk_vms_v1/ gtk_vms_v2/ gtk_tms_v1/   Linux 端 GTK4 外壳
+  macos_vms_v1/ q_s_vmsv1__login/       macOS 端原生外壳（Swift/AppKit）
 open_src/     Tongsuo、FFmpeg、OLLVM（仅编译依赖，不修改核心算法）
 shell/        构建、打包、nftables 规则、systemd 单元、护网巡检脚本
-include/      公共头文件
+include/     公共头（include_stdio/net/thd/time/xml/*.h + 各 q_xxx.h 安装后平铺）
 bin|lib|dll/  产物（严格平台分离）
 ```
 
@@ -111,7 +128,7 @@ bin|lib|dll/  产物（严格平台分离）
 | **服务端** | Linux only | 单线程 epoll ET reactor + 独立线程池 |
 | **客户端** | Windows / Linux / macOS | 阻塞 socket + 1 个收包线程，无需事件循环 |
 
-因此**不需要跨平台 poller**，只需 `lib_src/net/sock.h` 约 80 行兼容封装（`WSAStartup`、`closesocket`、`ioctlsocket`、`getaddrinfo`）。
+因此**不需要跨平台 poller**，只需 `include/include_net.h` 跨平台封装（q_fd_t / Q_SOCK_CLOSE / Q_FD_SET_NONBLOCK）（`WSAStartup`、`closesocket`、`ioctlsocket`、`getaddrinfo`）。
 
 **跨平台 socket 封装（已落地）**：服务端部署目标为 Linux，但底层库按跨平台实现，
 以便开发机（macOS / Windows）可直接编译调试：
@@ -134,16 +151,24 @@ Windows=WSAPoll），故在 macOS 开发机上 `q_reactor_create()` 可正常返
 ### 2.2 epoll reactor（服务端）
 
 ```c
-typedef struct reactor reactor_t;
-
-reactor_t *reactor_create(int max_conn);
-int  reactor_add(reactor_t *r, int fd, uint32_t events, void *udata);
-int  reactor_mod(reactor_t *r, int fd, uint32_t events, void *udata);
-int  reactor_del(reactor_t *r, int fd);
+/* 事件循环与有界线程池已下沉到 l_1/q_reactor（libqreactor），l_2/q_net 复用之；
+   句柄统一 q_fd_t（POSIX=int / Win64=uint64_t SOCKET）。 */
+typedef void (*q_reactor_handler_t)(q_fd_t fd, uint32_t events, void *ctx);
+q_reactor_t *q_reactor_create(void);
+int  q_reactor_add(q_reactor_t *r, q_fd_t fd, uint32_t events, q_reactor_handler_t h, void *ctx);
+int  q_reactor_mod(q_reactor_t *r, q_fd_t fd, uint32_t events, q_reactor_handler_t h, void *ctx);
+int  q_reactor_del(q_reactor_t *r, q_fd_t fd);
 /* 定时器：timerfd + 最小堆，精度 1ms */
-timer_id_t reactor_timer_add(reactor_t *r, uint64_t expire_ms, void (*cb)(void*), void *ud);
-void reactor_run(reactor_t *r);
-void reactor_stop(reactor_t *r);
+int  q_reactor_timer_create(q_fd_t *tfd_out);
+int  q_reactor_timer_arm(q_fd_t tfd, uint64_t first_ms, uint64_t interval_ms);
+int  q_reactor_run(q_reactor_t *r, int timeout_ms);     /* 单次轮询，主循环自循环调用 */
+void q_reactor_stop(q_reactor_t *r);
+
+/* 有界线程池（队列满则拒绝，防 DoS） */
+typedef struct q_tpool q_tpool_t;
+q_tpool_t  *q_tpool_create(int nthreads, int max_queue);
+void q_tpool_destroy(q_tpool_t *p);
+int  q_tpool_dispatch(q_tpool_t *p, void (*fn)(void*), void *arg);
 ```
 
 **自研事件循环必查清单**（这是放弃 libuv 的代价，务必逐项确认）：
@@ -159,11 +184,7 @@ void reactor_stop(reactor_t *r);
 ### 2.3 线程池（承载 SM2 / SM4 / 视频转码）
 
 ```c
-typedef struct thr_pool thr_pool_t;
-
-thr_pool_t *thr_pool_create(int nthreads, int queue_cap);
-/* 队列满则直接拒绝并计数告警，不无限堆积 */
-int thr_pool_submit(thr_pool_t *p, void (*fn)(void *), void *arg);
+/* 见 §2.2 的 q_tpool_*（l_1/q_reactor）。线程数≈CPU 核数，队列有界（如 1024）。 */
 ```
 
 - 线程数 = CPU 核数；任务队列**有界**（如 1024）
@@ -396,13 +417,14 @@ typedef struct { uint16_t tag; uint16_t len; uint8_t val[]; } tlv_t;
 | 0x0001 | HELLO | 否 | 能力协商 |
 | 0x0002 | KEY_EXCHANGE | 否 | SM2 协商 |
 | 0x0003 | LOGIN | 否 | 账号 + 口令 + OTP |
+| 0x0004 | SALT_QUERY | 否 | 登录前拉取账号 salt（方案A，防彩虹表） |
 | 0x0010 | HEARTBEAT | 是 | 保活 + Token 续期 |
 | 0x0020 | BIZ_QUERY | 是 | 业务查询 |
 | 0x0021 | BIZ_UPDATE | 是 | 业务变更 |
 | 0x0030 | VIDEO_OPEN | 是 | 视频通道 |
 | 0x0040 | LOGOUT | 是 | 注销 |
 
-**未认证状态下收到任何非 0x0001~0x0003 指令 → 立即断连并计入 IP 信誉。**
+**未认证状态下收到任何非 0x0001~0x0004 指令 → 立即断连并计入 IP 信誉。**
 
 ### 5.4 连接状态机
 
@@ -427,6 +449,55 @@ NEW ──recv HELLO──> HELLO_DONE ──recv KEY_EXCHANGE──> KEY_DONE
 
 ---
 
+### 5.6 进程间通信协议（netd ↔ bizd ↔ 微服务）
+
+数据流：`客户端` --加密帧--> `netd` --UDS 可信 TLV--> `bizd` --TCP JSON--> `下游微服务`
+
+**① netd ↔ bizd（Unix Socket，q_ipc）**
+
+分帧：`[4 字节大端长度][负载]`，负载为 TLV 序列（`tag(2,网络序)+len(2,网络序)+val`）。
+外层 TLV tag 统一定义在 `include/include_ipc_proto.h`，**两端共用同一份定义**，严禁在 `srv_netd.h` / `srv_bizd.h` 各自重复定义。
+
+| tag | 含义 | val 编码 |
+|---|---|---|
+| 0x0001 CMD | 业务指令字 | uint16 网络序 |
+| 0x0002 BODY | 业务体（内层 TLV 序列） | 原样 |
+| 0x0003 SRC_IP | 客户端真实源 IP | [1B 族:4=IPv4/6=IPv6][16B 地址] |
+| 0x0004 CHANID | 通道绑定 ID | 32B |
+| 0x0005 USERID | SM3(用户名) | 32B |
+| 0x0006 TOKEN | 会话 Token | 32B |
+| 0x0007 RESULT | 结果码 | uint32 网络序 |
+| 0x0008 REQID | 请求号（字符串，跨 netd/bizd/微服务对账） | 文本 |
+
+- 请求方向：CMD + BODY + SRC_IP + CHANID + USERID（业务请求时 BODY 内另含 TOKEN）
+- 响应方向：RESULT + BODY（登录成功时另含 TOKEN）
+
+**② bizd → 下游微服务（TCP + JSON）**
+
+分帧同上：`[4 字节大端长度][UTF-8 JSON]`。
+
+```json
+// 请求
+{
+  "ver": 1,
+  "id":  "17",
+  "cmd": 32,
+  "cmd_name": "BIZ_QUERY",
+  "ctx": { "src_ip": "203.0.113.7", "user_id": "<64hex>", "device_id": "<64hex>", "channel_id": "<64hex>" },
+  "token": "<64hex>",
+  "params": { }
+}
+// 响应
+{ "ver": 1, "id": "17", "result": 0, "message": "ok", "data": { } }
+```
+
+约定：整数整网络上传输统一大端；JSON 数值字段保持十进制；二进制字段（token/user_id/device_id/channel_id）用小写 hex 字符串；单包上限 256KB；结果码 `0` OK / `1` 下游不可用 / `2` 请求非法 / `3` Token 无效过期绑定不匹配 / `4` 权限不足 / `5` 内部错误。
+
+**③ 路由表（cmd → 下游端点）**：`HELLO→hello`、`LOGIN/HEARTBEAT/LOGOUT/SALT_QUERY→auth`、`BIZ_QUERY/BIZ_UPDATE→bizd`、`VIDEO_OPEN→video`，端点地址在 `bizd_conf.xml` 的 `ep_*` 配置。
+
+**已知缺口**：`0x0002 KEY_EXCHANGE` 在状态机白名单无条目（由 `q_chan_handshake` 带外完成）；`q_chan_recv` 先按攻击者可控 `body_len`(上限16MB) malloc，netd 配额在其后，建议给 `q_chan` 加最大帧长上限；**PoW（§6.5）未实现**。
+
+---
 ## 6. 身份鉴别与会话
 
 ### 6.1 双因素：口令 + TOTP（HMAC-SM3）
@@ -550,11 +621,24 @@ CFLAGS="-O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
 
 ---
 
-## 8. 客户端（GTK4）
+## 8. 客户端（多端分治：Windows WinUI3 / Linux GTK4 / macOS 原生）
+
+> 客户端通信内核的**接口、流程、约束、三端对接方式、参考实现、构建矩阵**已单列文档：《客户端通信接口与开发指南.md》，其它 AI 可直接照其实现，无需阅读服务端源码。
+
+### 8.0 架构总览
+
+通信内核与 UI 外壳**强制分离**：
+
+- **通信内核（三端共享，纯 C）**：`lib_src/l_4/q_clientcomm/`（产物 `libqclientcomm.a` / Windows `qcomm.dll`），封装 `q_chan`/`q_net`/`q_codec`/`q_crypto`，对外暴露**稳定 C ABI 门面**（`qc_session_create/qc_connect/qc_hello/qc_login/qc_request/qc_heartbeat/qc_logout/qc_close`）。UI 层**绝不**直接碰 `q_fd_t` / `q_chan_t`。
+- **UI 外壳（各端独立）**：
+  - **Windows = WinUI 3**（WinAppSDK）：C# 经 P/Invoke 调 `qcomm.dll`，或 C++/WinRT 直链 `.lib`；回包经 `DispatcherQueue.TryEnqueue` 投回 UI 线程。
+  - **Linux = GTK4**（C）：直链 `libqclientcomm.a`；回包经 `g_idle_add` 投回主循环。
+  - **macOS = 原生**（AppKit/SwiftUI，Swift/ObjC）：经 Bridging Header / ModuleMap 调 C 内核；回包经 `DispatchQueue.main.async` 投回主线程。
+- 三端内置**同一份服务端静态公钥 DER** 与 `key_id`（默认 1）、`seq0=1`；任一端密钥轮换须同步三端。
 
 ### 8.1 组件选型
 
-| 需求 | GTK4 方案 | 备注 |
+| 需求 | GTK4 方案（Linux 端；Windows/macOS 见各端外壳） | 备注 |
 |---|---|---|
 | 窗口 / 应用 | `GtkApplication` + `GtkApplicationWindow` | |
 | 多标签页 | **`GtkNotebook`** | GTK4 中仍可用；`AdwTabView` 属 libadwaita，不引入以保持纯 GTK4 |
@@ -570,10 +654,11 @@ CFLAGS="-O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
 ### 8.2 线程模型
 
 ```
-主线程（GTK）    ← 所有 UI 操作
-收包线程         ← 阻塞收包 → g_idle_add() 投递
-发送             ← 主线程直接发（或独立发送队列线程）
-视频解码线程     ← FFmpeg libavcodec → 帧队列 → g_idle_add() 渲染
+Windows(WinUI3)  主线程(UI) ← DispatcherQueue.TryEnqueue ← 后台 Task/Thread(阻塞收包)
+Linux(GTK4)      主线程(UI) ← g_idle_add()              ← GThread(阻塞收包)
+macOS(Swift)     主线程(UI) ← DispatchQueue.main.async   ← DispatchQueue.global(阻塞收包)
+发送             各端均可主线程直发（qc_request 内部收发成对，禁止并发多发未确认帧）
+视频解码线程     FFmpeg libavcodec → 帧队列 → 投回主线程渲染
 ```
 
 ### 8.3 无 GPU 环境
@@ -584,13 +669,13 @@ CFLAGS="-O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
 
 | 平台 | 方案 |
 |---|---|
-| Windows | MSYS2 `mingw-w64-x86_64-gtk4` + 自写 `shell/pkg_win.sh` 收集 DLL（或 gvsbuild / MSVC） |
-| macOS | Homebrew `gtk4` + `gtk-mac-bundler` |
-| Linux | 系统包 `libgtk-4-1`，或打包 AppImage |
+| Windows | WinUI3（WinAppSDK）→ MSIX 打包；`qcomm.dll` + Tongsuo 运行库随包分发；MSVC 或 clang-cl 编译内核 |
+| macOS | 原生 app（Xcode）→ 公证（notarization）；Tongsuo 静态链入或 framework；`libqclientcomm.a` 随 app 链接 |
+| Linux | 系统包 `libgtk-4-1`，或打包 AppImage；`libqclientcomm.a` 静态链入 |
 
 ### 8.5 客户端加固（定位：提高成本，非安全边界）
 
-- **OLLVM**：仅对**通信内核**（`lib_src/crypto`、`lib_src/proto`）开启控制流平坦化 + 虚假控制流；GTK UI 不混淆（体积大收益低）
+- **OLLVM**：仅对**通信内核**（`l_4/q_clientcomm` / `q_crypto` / `q_chan`）开启控制流平坦化 + 虚假控制流；各端 UI 不混淆（体积大收益低）
 - 符号剥离 `strip`；敏感字符串运行时解密
 - 反调试（Windows）：检测调试器、反 Dump
 - **重要提醒**：客户端运行在攻击者自己的机器上，加固只是延缓逆向，**服务端必须在协议完全公开的前提下仍然安全**
@@ -664,7 +749,7 @@ CFLAGS="-O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
 | 2 | `lib_src/crypto` 国密封装（Tongsuo） | SM2/SM3/SM4 单测通过 |
 | 3 | `lib_src/proto` 帧 + TLV + 状态机 | Fuzz 7×24h 零崩溃 |
 | 4 | `soft_src/knockd` SPA + nftables | nmap 扫描端口为 filtered |
-| 5 | `soft_src/netd` + `bizd` 进程隔离 + IPC | 端到端跑通 |
+| 5 | `soft_src/netd`(8 文件) + `bizd`(7 文件) 进程隔离 + IPC（`include_ipc_proto.h` 契约） | 已实现；端到端打通待下游微服务联调 |
 | 6 | 登录 + OTP + Token + 会话 | 双因素可用 |
 | 7 | GTK4 客户端：登录 + 2 张表格 | 跨平台可运行 |
 | 8 | 审计日志（SM3 链式） | 可溯源 |
@@ -710,9 +795,9 @@ CFLAGS="-O2 -fPIE -pie -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
 
 ---
 
-## 15. 与 `AI_SKILL_RULE.md.md` 的冲突修正
+## 15. 与 `AI_SKILL_RULE.md` 的冲突修正
 
-`AI_SKILL_RULE.md.md` 存在三处与本方案冲突的描述，建议同步修正，避免后续 AI 生成代码时技术栈错乱：
+`AI_SKILL_RULE.md` 存在三处与本方案冲突的描述，建议同步修正，避免后续 AI 生成代码时技术栈错乱：
 
 | 位置 | 原文 | 应改为 |
 |---|---|---|

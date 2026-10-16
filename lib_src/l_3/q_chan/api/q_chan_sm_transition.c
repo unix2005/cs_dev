@@ -42,6 +42,12 @@ int q_chan_sm_transition(q_chan_st_t *st, q_chan_ev_t ev)
         else
             return -1;
         break;
+    case Q_CHAN_EV_PREAUTH_CMD:
+        /* 未认证/已认证态的只读查询（如 SALT_QUERY）：不改变认证态 */
+        if (cur == Q_CHAN_ST_NEW || cur == Q_CHAN_ST_CLOSED)
+            return -1;
+        next = cur;
+        break;
     case Q_CHAN_EV_AUTH_CMD:
         if (cur == Q_CHAN_ST_AUTHED)
             next = Q_CHAN_ST_AUTHED;
