@@ -196,7 +196,7 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         get
         {
             var leaf = Companies.SelectMany(c => c.DescendantsAndSelf()).OfType<CompanyNode>()
-                                .Where(n => !n.CompanyChildren.Any() && n.IsChecked)
+                                .Where(n => !n.CompanyChildren.Any() && n.IsChecked == true)
                                 .ToList();
             var vehicles = leaf.Sum(n => (long)n.Count);
             return leaf.Count == 0 ? "未勾选组织" : $"已勾选 {leaf.Count} 个组织，覆盖 {vehicles:N0} 台车";
@@ -245,6 +245,81 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         if (Diag.VehicleSelectionCheck)
         {
             Post(() => _ = RunVehicleSelectionCheckAsync());
+        }
+
+        // 诊断开关 VMS_DIAG=orgclick：用框架自己的点击处理器真实点三次组织复选框，
+        // 逐步记录控件值/模型值/联动结果（写 diagtrace.log + orgclick.log）。
+        if (Diag.OrgClickProbe)
+        {
+            Post(() => _ = RunOrgClickProbeAsync());
+        }
+
+        // 诊断开关 VMS_DIAG=tristate：找一个含≥2下级的组织，勾选其中 1 个下级，
+        // 让该父组织变成"部分选择"(null)，并展开它（使其与已勾下级都可见），
+        // 用于截图验证"父组织半选框"这一经典三态表现。仅改模型态，不联动数据栏，纯展示用。
+        if (Diag.TriStateDemo)
+        {
+            Post(() =>
+            {
+                var parent = Companies.SelectMany(c => c.CompanyChildren)
+                                      .FirstOrDefault(p => p.CompanyChildren.Count() >= 2);
+                if (parent is null) return;
+                parent.IsExpanded = true;                                  // 展开父，使下级可见
+                var firstChild = parent.CompanyChildren.First();
+                firstChild.SetCheckedWithPropagation(true);                // 勾 1 个下级 → 父变部分选择(null)
+            });
+        }
+    }
+
+    /// <summary>
+    /// 把树上的组织勾选、车辆勾选、选中集与组织范围<b>全部复位到未选</b>。
+    /// 供诊断探针在多个目标之间反复做"干净初值 → 点击 → 断言"。
+    /// </summary>
+    public async Task ResetTreeChecksAsync()
+    {
+        foreach (var c in Companies) c.SetSubtreeChecked(false);
+        foreach (var v in Companies.SelectMany(c => c.DescendantsAndSelf()).OfType<VehicleNode>())
+            v.IsChecked = false;
+        _selectedVehicleIds.Clear();
+        _orgAddedIds.Clear();
+        _scopeCompanyId = 0;
+        _scopeCompanyName = string.Empty;
+        SelectedCompanyId = 0;
+        OnPropertyChanged(nameof(SelectedVehicleCount));
+        OnPropertyChanged(nameof(SelectionSummary));
+        await ApplyScopeAsync(CancellationToken.None);
+    }
+
+    /// <summary>
+    /// <c>VMS_DIAG=orgclick</c> 的无人值守探针：让 UI 层用<b>框架自己的点击处理器</b>连点三次
+    /// 组织复选框，把每步的控件值 / 模型值 / 联动结果写到 <c>%LocalAppData%\Vms.Client\orgclick.log</c>
+    /// （点击处理内部的打点同步写 diagtrace.log）。
+    ///
+    /// 目的：三态 CheckBox 的点击循环顺序与 TwoWay 回写时机都是运行期行为，读代码推不出来，
+    /// 只能实测。用来回答"为什么真机点了没对号"这类问题。
+    /// </summary>
+    private async Task RunOrgClickProbeAsync()
+    {
+        try
+        {
+            var panel = Controls.CompanyTreePanel.Current;
+            var text = panel is null
+                ? "树面板尚未创建（CompanyTreePanel.Current 为 null）"
+                : await panel.RunOrgClickProbeAsync();
+
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "orgclick.log"), text,
+                              new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        }
+        catch (Exception ex)
+        {
+            Diag.Log($"[orgclick] 探针异常：{ex}");
+        }
+        finally
+        {
+            Diag.FlushTrace();
         }
     }
 
@@ -323,13 +398,13 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
 
             // 7) 取消组织勾选 → 清空数据栏 + 取消其车辆勾选 + **组织对号本身复位**
             //
-            // ⚠ 组织对号(IsChecked)复位是本条的核心回归点：三态 CheckBox 的点击循环含
-            // 半选(null)，旧实现按 `cb.IsChecked != false` 判意图 → null 也走"全选"，
-            //   表现为"点了取消，对号还在"（用户实机反馈）。这里显式断言对号已回 false。
+            // 三态下：取消一个被全选的组织 ⇒ 该组织及子树回 false，父组织（若仍有其它勾选项）
+            // 会经 RecomputeAncestors 变成"部分选择"(null)。这里断言该组织本身已回 false、
+            // 且树下车辆勾选已清空。
             await UpdateOrgSelectionAsync(leaf, false);
             RebuildPositions();
-            bool leafVehiclesStillChecked = leaf.VehicleChildren.Any(v => v.Id != 0 && v.IsChecked);
-            bool orgMarkCleared = !leaf.IsChecked;
+            bool leafVehiclesStillChecked = leaf.VehicleChildren.Any(v => v.Id != 0 && v.IsChecked == true);
+            bool orgMarkCleared = leaf.IsChecked != true;
             bool orgClearOk = Feed.Count == 0 && Positions.Count == 0 &&
                               !leafVehiclesStillChecked && orgMarkCleared;
             sb.AppendLine(
@@ -340,11 +415,47 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
 
             // 8) 往返回纳：取消后必须还能重新勾上（防止"只能进不能出"的单向锁死）
             await UpdateOrgSelectionAsync(leaf, true);
-            bool recheckOk = leaf.IsChecked && Feed.TotalCount == orgTotal;
+            bool recheckOk = leaf.IsChecked == true && Feed.TotalCount == orgTotal;
             sb.AppendLine(
                 $"{(recheckOk ? "PASS" : "FAIL")} 取消后再勾选 → 可重新勾上（往返回纳）\n" +
                 $"  组织 IsChecked={leaf.IsChecked}  Feed.TotalCount={Feed.TotalCount} (期望 {orgTotal})  " +
                 $"({(recheckOk ? "OK" : "BAD")})");
+
+            // 8.5) 三态父级推导（本次需求的核心）：找一个含 ≥2 个下级组织的父组织，
+            //      勾其中 1 个 → 父应变"部分选择"(null)；勾全部 → 父变 true；取消 1 个 → 回到 null。
+            var parent = Companies.SelectMany(c => c.CompanyChildren)
+                                  .FirstOrDefault(p => p.CompanyChildren.Count() >= 2);
+            if (parent is null)
+            {
+                sb.AppendLine("SKIP 三态父级推导（找不到含≥2下级组织的父组织，跳过）");
+            }
+            else
+            {
+                var kids = parent.CompanyChildren.Take(2).ToList();
+                var d = (bool b) => b ? "OK" : "BAD";
+                var s = (bool? v) => v == true ? "True" : v == false ? "False" : "null";
+
+                kids[0].SetCheckedWithPropagation(true);              // 勾第 1 个下级
+                bool partialAfterOne = parent.IsChecked == null;
+                string afterOne = s(parent.IsChecked);
+                kids[1].SetCheckedWithPropagation(true);              // 勾第 2 个下级（全部勾上）
+                bool allAfterTwo = parent.IsChecked == true;
+                string afterTwo = s(parent.IsChecked);
+                kids[0].SetCheckedWithPropagation(false);             // 取消第 1 个
+                bool partialAfterUncheck = parent.IsChecked == null;
+                string afterUncheck = s(parent.IsChecked);
+
+                // 复位：把所有下级组织取消，父级随之回 false，避免污染后续/截图
+                foreach (var k in parent.CompanyChildren) k.SetCheckedWithPropagation(false);
+
+                bool triOk = partialAfterOne && allAfterTwo && partialAfterUncheck;
+                sb.AppendLine(
+                    $"{(triOk ? "PASS" : "FAIL")} 三态父级推导：勾1个下级→父部分选择(null)；勾全部→父true；取消1个→回null\n" +
+                    $"  父组织={parent.Name} 下级数={parent.CompanyChildren.Count()}\n" +
+                    $"  勾1个后 父IsChecked={afterOne}(期望 null, {d(partialAfterOne)})\n" +
+                    $"  勾全部后 父IsChecked={afterTwo}(期望 True, {d(allAfterTwo)})\n" +
+                    $"  取消1个后 父IsChecked={afterUncheck}(期望 null, {d(partialAfterUncheck)})");
+            }
 
             // 9) UI 层：真实点两次组织复选框，断言**控件上的对号**真的翻转。
             //    模型 IsChecked 对 ≠ 用户看到的对号对，本条才是"取消勾选后对号消失"的直接证据。
@@ -558,6 +669,9 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
 
             if (fitsIds)
             {
+                // 小组织：模型把本级及整棵子树置为全选（三态），数据层把每辆车 id 收进选中集
+                org.SetCheckedWithPropagation(true);
+
                 var (rows, _) = await _source.QueryAsync(new VehicleQuery { CompanyId = org.Id, Limit = (uint)total }, ct);
                 var ids = rows.Select(r => r.Id).ToList();
                 _orgAddedIds[org.Id] = ids;
@@ -578,6 +692,7 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                 _orgAddedIds.Clear();
                 UncheckAllTreeVehicles();
                 UncheckAllOrgsExcept(org);
+                SetTreeVehiclesCheckedAll(org, true);   // 树上已加载的下级车辆同步勾上（语义：整棵子树选中）
                 _scopeCompanyId = org.Id;
                 _scopeCompanyName = org.Name;
                 SelectedCompanyId = org.Id;
@@ -585,10 +700,10 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         }
         else
         {
-            // 取消勾选：清空该组织贡献的车辆选择，并把它（含下级）的组织对号一并撤掉。
-            // 组织对号由 OrgCheck_Click 在点击时已置 false；这里再兜一次底，
+            // 取消勾选：清空该组织贡献的车辆选择，并把本级及整棵子树的对号撤掉（含父级回溯）。
+            // 组织对号由 OrgCheck_Click 在点击时已走 SetCheckedWithPropagation 置 false；这里再兜一次底，
             // 覆盖"从数据栏/地图侧取消"等不经过复选框点击的路径，避免 UI 与数据范围脱节。
-            org.SetSubtreeChecked(false);
+            org.SetCheckedWithPropagation(false);
 
             if (_orgAddedIds.TryGetValue(org.Id, out var ids))
             {
@@ -617,6 +732,18 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
             v.IsChecked = value;
     }
 
+    /// <summary>
+    /// 把 org 子树内<b>已加载</b>的车辆行<b>批量</b>置勾选/取消。
+    ///
+    /// ⚠ 批量赋值不会走用户点击那条路（车辆复选框挂的是 <c>Click</c>，程序化赋值不触发），
+    /// 所以这里既不会重算父级、也不会改数据范围 —— 正是"组织级联勾选"想要的：只改树上的显示态。
+    /// </summary>
+    private void SetTreeVehiclesCheckedAll(CompanyNode org, bool value)
+    {
+        foreach (var v in org.DescendantsAndSelf().OfType<VehicleNode>().Where(v => v.Id != 0))
+            v.IsChecked = value;
+    }
+
     /// <summary>取消树上全部已加载车辆行的勾选；within 非空时只处理该组织子树。</summary>
     private void UncheckAllTreeVehicles(CompanyNode? within = null)
     {
@@ -642,10 +769,15 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
 
         foreach (var c in Companies.SelectMany(r => r.DescendantsAndSelf()).OfType<CompanyNode>())
             if (!keepIds.Contains(c.Id))
-                c.IsChecked = false;          // setter 会向下级联清空其子树
+                c.SetSubtreeChecked(false);   // 批量置位（不回溯），避免 O(n²)
 
-        // keep 整棵子树置勾选（父在下级之后不会被误清）
-        if (keep is not null) keep.SetSubtreeChecked(true);
+        // keep 整棵子树置勾选（父在下级之后不会被误清），随后沿父链重算祖先 ——
+        // keep 的兄弟组织都已被取消，祖先组织据此变成"部分选择"(null)，正是三态树应有的表现。
+        if (keep is not null)
+        {
+            keep.SetSubtreeChecked(true);
+            keep.RecomputeAncestors();
+        }
     }
 
     /// <summary>确保 org 子树（含各级下级组织）的车辆已加载，便于勾选态在树上可见。</summary>
@@ -744,10 +876,19 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
             var (rows, total) = await _source.QueryAsync(
                 new VehicleQuery { CompanyId = node.Id, Limit = VehicleTreePageSize }, CancellationToken.None);
 
+            // ⚠ 新加载出来的车辆要**继承所属组织的勾选态**（在加入集合之前设好，避免多余通知）：
+            // 组织已被全选时再展开，挂在它下面的车必须也是勾上的 —— 否则用户"勾了组织 → 展开一看，
+            // 下级车辆一个都没勾"，与"勾选组织 = 选中其整棵子树"的语义直接冲突。
+            bool inheritChecked = node.IsChecked == true;
+
             foreach (var v in node.VehicleChildren.ToList())
                 node.Children.Remove(v);
             foreach (var r in rows)
-                node.AddVehicle(VehicleNode.From(r));
+            {
+                var vehicle = VehicleNode.From(r);
+                vehicle.IsChecked = inheritChecked;
+                node.AddVehicle(vehicle);
+            }
 
             if (total > rows.Count)
                 node.AddVehicle(VehicleNode.Placeholder(

@@ -43,6 +43,7 @@
                           HorizontalAlignment="Left"
                           IsChecked="{x:Bind IsChecked, Mode=TwoWay}"
                           Click="OrgCheck_Click"
+                          Tag="OrgSelect"
                           VerticalAlignment="Center" />
 
                 <TextBlock Grid.Column="1" Text="{x:Bind Name}" FontSize="13"
@@ -88,7 +89,7 @@
                           FontSize="12.5"
                           HorizontalAlignment="Left" VerticalAlignment="Center"
                           IsChecked="{x:Bind IsChecked, Mode=TwoWay}"
-                          Checked="VehicleCheck_Changed" Unchecked="VehicleCheck_Changed" />
+                          Click="VehicleCheck_Click" />
 
                 <!-- 需求：车牌号前面不要加任何图标/圆点，只保留车牌文字。
                      状态（在线蓝/离线灰/报警红）仍由文字颜色承载 —— VehicleStateBrush

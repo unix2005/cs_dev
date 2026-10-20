@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using Vms.Client.Diagnostics;
 using Vms.Client.Models;
 using Vms.Client.ViewModels;
 
@@ -83,12 +84,31 @@ public sealed partial class CompanyTreePanel : UserControl
     private void AllVehicles_Click(object sender, RoutedEventArgs e)
         => Post(async () => await ViewModel.Monitor.SelectAllAsync());
 
-    /// <summary>车辆行复选框：勾上/取消 = 加入/移出"定位数据联动"的选中集合。
-    /// 事件来自用户点击（UI 线程，非本机布局回调），更新集合安全；内部仍走 Post 保持纪律。</summary>
-    private void VehicleCheck_Changed(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// 车辆行复选框：勾上/取消 = 加入/移出"定位数据联动"的选中集合。
+    ///
+    /// ⚠⚠ **必须挂 <c>Click</c>，绝不能挂 <c>Checked</c>/<c>Unchecked</c>**（本项目正是由此栽了一个
+    /// "点了组织没对号、下级车辆也没选中"的坑，代价是一整轮排查）：
+    ///   · <c>Checked</c>/<c>Unchecked</c> 在**值变化**时触发，**程序化赋值也会触发**；
+    ///   · <c>Click</c> 只在**用户交互**（鼠标/键盘/OnClick）时触发，程序化设 <c>IsChecked</c> 不触发。
+    /// 而"勾选组织 → 级联把子树车辆置勾选"正是程序化赋值（<c>SetTreeVehiclesChecked</c>）。
+    /// 挂了 Checked/Unchecked 的后果：级联每置一台车就回调一次 ——
+    ///   ① <c>RecomputeAncestors()</c> 按"车辆大多没勾"把父组织重算成 false/null，
+    ///      **把用户刚勾上的对号当场冲掉**（叶子组织必现，因为只有叶子组织才挂车辆节点）；
+    ///   ② <c>UpdateVehicleSelectionAsync</c> 把范围改成"按车辆 id"，把组织范围顶掉，数据栏随之清空。
+    ///
+    /// 事件来自用户点击（UI 线程，非本机布局回调），更新集合安全；内部仍走 Post 保持纪律。
+    /// 勾选/取消一台车后，要沿父链重算祖先组织 —— 父组织随之变"部分选择"(null) 或回满/回空，
+    /// 这是三态树"单独勾几台车 → 父组织显示半选"的关键。
+    /// </summary>
+    private void VehicleCheck_Click(object sender, RoutedEventArgs e)
     {
         if (((FrameworkElement)sender).DataContext is not VehicleNode vehicle) return;
-        Post(async () => await ViewModel.Monitor.UpdateVehicleSelectionAsync(vehicle, vehicle.IsChecked));
+        // TwoWay 绑定已在 Click 之前把控件翻转后的值回写进模型，直接读模型即可
+        bool selected = vehicle.IsChecked == true;
+        Diag.Log($"[VehicleCheck_Click] 车={vehicle.Name} selected={selected}");
+        vehicle.RecomputeAncestors();                 // 父组织可能变为部分选择
+        Post(async () => await ViewModel.Monitor.UpdateVehicleSelectionAsync(vehicle, selected));
     }
 
     /// <summary>
@@ -111,14 +131,42 @@ public sealed partial class CompanyTreePanel : UserControl
     /// </summary>
     private void OrgCheck_Click(object sender, RoutedEventArgs e)
     {
-        if (((FrameworkElement)sender).DataContext is not CompanyNode org) return;
+        if (((FrameworkElement)sender).DataContext is not CompanyNode org)
+        {
+            // 这条打点专治"点了没反应"：DataContext 不是组织时 handler 会静默退出，
+            // 而控件自身已经翻转过，肉眼看就是"点了没变化"，不落盘根本查不出来。
+            Diag.Log($"[OrgCheck_Click] 提前退出：DataContext={((FrameworkElement)sender).DataContext?.GetType().Name ?? "null"}");
+            return;
+        }
+
+        var cb = sender as CheckBox;
+        Diag.Log($"[OrgCheck_Click] 进入 org={org.Name}(Id={org.Id}) " +
+                 $"cb.IsChecked={Str(cb?.IsChecked)} 模型.IsChecked={Str(org.IsChecked)} " +
+                 $"IsThreeState={cb?.IsThreeState}");
 
         // 依据 TwoWay 回写后的当前值反推意图（见上方说明）
         bool target = org.IsChecked != null;          // null→false；true/false→true
 
         org.SetCheckedWithPropagation(target);        // 本级+下级级联 + 向上重算父（含部分态）
+        Diag.Log($"[OrgCheck_Click] target={target} 传播后 模型={Str(org.IsChecked)} cb={Str(cb?.IsChecked)}");
+
+        // ⚠ 显式把控件对齐到推导出的确定态：三态 CheckBox 的点击循环会在 Click 之前把控件翻成 null，
+        // 而 TwoWay 把 null 回写进模型后、模型再被设为 target 时，控件未必及时刷回 target
+        // （实测表现为"取消勾选后控件停在半选 null"）。这里直接兜底，确保"用户看到的对号"=模型值。
+        if (cb is not null && cb.IsChecked != target)
+        {
+            cb.IsChecked = target;
+            Diag.Log($"[OrgCheck_Click] 控件对齐到 {target}");
+        }
+
+        Diag.Log($"[OrgCheck_Click] 结束 模型={Str(org.IsChecked)} cb={Str(cb?.IsChecked)}");
         Post(async () => await ViewModel.Monitor.UpdateOrgSelectionAsync(org, target));
     }
+
+    /// <summary>把 <c>bool?</c> 打成可读串（null 要显式可见 —— 三态里 null 是"部分选择"）。</summary>
+    private static string Str(bool? b) => b is null ? "null" : b.Value ? "True" : "False";
+
+    // （沿继承链查方法的 FindMethodInHierarchy 见下方"真实输入注入"区）
 
     private void Tree_Expanding(TreeView sender, TreeViewExpandingEventArgs args)
     {
@@ -210,20 +258,185 @@ public sealed partial class CompanyTreePanel : UserControl
     }
 
     /// <summary>
-    /// 模拟"用户点一下复选框"：翻转 <c>IsChecked</c>（TwoWay 回写模型）后触发 <c>Click</c>。
+    /// 模拟"用户点一下组织复选框"：先按 WinUI 三态 CheckBox 的真实点击循环翻转控件值
+    /// （<c>false → true → null → false</c>，TwoWay 把新值回写进模型），再直接调用
+    /// <see cref="OrgCheck_Click"/>（同一份点击逻辑，不经过 <c>ToggleButton.OnClick</c> 的二次翻转）。
     ///
-    /// <c>OnClick</c> 是 <see cref="ToggleButton"/> 的 protected 方法，外部调不到，
-    /// 这里只在<b>诊断路径</b>用一次反射调它。换来的是"断言的就是真实点击路径"，
-    /// 代价可以接受；反射找不到就放弃（返回 false），绝不让诊断成为崩溃源。
+    /// ⚠ 不能反射调 <c>OnClick</c>：OnClick 内部会再翻转一次 IsChecked，导致"双重翻转"把结果测反，
+    /// 那不是用户真实点击路径（真实点击由框架先翻转、再 Raise Click，OnClick 不再翻）。
+    /// 直接调 OrgCheck_Click 才等价于用户的真实点击行为，断言才可信。
     /// </summary>
-    private static async Task ToggleCheckBoxAsync(CheckBox cb)
+    private async Task ToggleCheckBoxAsync(CheckBox cb)
     {
-        cb.IsChecked = cb.IsChecked != true;      // 先翻转（TwoWay 把新值回写进模型）
-        var onClick = typeof(ToggleButton).GetMethod(
-            "OnClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        // ⚠ WinUI 3 的 RoutedEventArgs 只有**无参**构造（WPF 才 RoutedEventArgs(RoutedEvent)）。
-        onClick?.Invoke(cb, [new RoutedEventArgs()]);
+        cb.IsChecked = cb.IsChecked switch            // 复刻三态点击循环（框架在点击时先翻这一步）
+        {
+            false => true,
+            true => null,
+            null => false,
+        };
+        // 直接走点击处理逻辑（与用户真实点击同一条代码路径，无二次翻转）
+        OrgCheck_Click(cb, new RoutedEventArgs());
         await Task.Delay(400);                    // 让 Post 出去的 VM 更新落地
+    }
+
+    /// <summary>
+    /// <c>VMS_DIAG=orgclick</c>：用<b>框架自己的点击处理器</b>（反射调 <c>ToggleButton.OnClick</c>）
+    /// 真实点某个组织的复选框三次，逐步记录"控件值 / 模型值 / 子树车辆勾选数 / 数据栏条数"。
+    ///
+    /// 为什么必须走 <c>OnClick</c> 而不是"手动翻转 + 调 handler"：
+    /// 真实点击的唯一入口就是 <c>OnClick</c> —— 它负责翻转 <c>IsChecked</c>、把值回写给绑定源、
+    /// 再 Raise <c>Click</c>。手动翻转会绕开"翻转 → 回写 → Click"这个真实时序，
+    /// 测出来的结论与真机不符（本项目就是这么被误导过一轮：诊断全 PASS，用户实机点不动）。
+    /// </summary>
+    public async Task<string> RunOrgClickProbeAsync()
+    {
+        var sb = new System.Text.StringBuilder();
+        var all = ViewModel.Monitor.Companies
+                           .SelectMany(c => c.DescendantsAndSelf()).OfType<CompanyNode>().ToList();
+
+        // 覆盖三类节点 —— 只测根节点会漏掉真实故障点（用户点的"一公司"是叶子组织）：
+        //   ① 根（18714 台，走 CompanyId 整树）；
+        //   ② 叶子组织且车辆 >256（862 台，同样走 CompanyId 整树，但**有父**）；
+        //   ③ 叶子组织且车辆 ≤256（走 Ids 精确过滤，且会加载车辆到树上）；
+        //   ④ 有下级组织的分公司（验证级联）。
+        var targets = new List<CompanyNode>();
+        CompanyNode? Pick(Func<CompanyNode, bool> f) => all.FirstOrDefault(f);
+        var root = all.FirstOrDefault(c => c.Parent is null);
+        var bigLeaf = Pick(c => !c.CompanyChildren.Any() && c.Count > VehicleQuery.MaxIdFilter);
+        var smallLeaf = Pick(c => !c.CompanyChildren.Any() && c.Count > 0 && c.Count <= VehicleQuery.MaxIdFilter);
+        var withKids = Pick(c => c.CompanyChildren.Any() && c.Parent is not null);
+        foreach (var t in new[] { root, bigLeaf, smallLeaf, withKids })
+            if (t is not null && !targets.Contains(t)) targets.Add(t);
+
+        if (targets.Count == 0) { sb.AppendLine("树里没有组织节点，探针放弃"); return sb.ToString(); }
+
+        var hwnd = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+        sb.AppendLine($"主窗口 hwnd=0x{hwnd.ToInt64():X}（0=取不到句柄）");
+        if (hwnd != IntPtr.Zero)
+        {
+            ShowWindow(hwnd, 9);               // SW_RESTORE：最小化时先还原，否则前台设置无效
+            sb.AppendLine($"SetForegroundWindow={SetForegroundWindow(hwnd)}");
+        }
+        await Task.Delay(300);
+
+        foreach (var org in targets)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"########## 目标：{org.Name}(Id={org.Id}) 车辆总数={org.Count} " +
+                          $"下级组织={org.CompanyChildren.Count()} 有父={org.Parent is not null}");
+            await ProbeOneOrgAsync(sb, org);
+        }
+
+        // 收尾：复位后勾一个<b>叶子组织</b>并展开它，便于截图肉眼确认
+        // "勾组织 → 对号出现 + 下级车辆全部勾上" 这两件事（用户实机反馈的两个点）。
+        var demo = bigLeaf ?? root;
+        if (demo is not null)
+        {
+            await ViewModel.Monitor.ResetTreeChecksAsync();
+            await EnsureOrgVisibleAsync(demo);
+            demo.SetCheckedWithPropagation(true);
+            await ViewModel.Monitor.UpdateOrgSelectionAsync(demo, true);
+            await EnsureOrgVisibleAsync(demo);
+            int loaded = demo.DescendantsAndSelf().OfType<VehicleNode>().Count(v => v.Id != 0);
+            int picked = demo.DescendantsAndSelf().OfType<VehicleNode>().Count(v => v.Id != 0 && v.IsChecked == true);
+            sb.AppendLine();
+            sb.AppendLine($"########## 收尾演示（截图用）：{demo.Name}(Id={demo.Id}) 已勾选，" +
+                          $"展开后车辆应全部勾上：{picked}/{loaded}，数据栏 Feed.Count={ViewModel.Monitor.Feed.Count}");
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>对单个组织做一次"复位 → 真实点击 → 记录"，把每一层的表现都摆出来。</summary>
+    private async Task ProbeOneOrgAsync(System.Text.StringBuilder sb, CompanyNode org)
+    {
+        await EnsureOrgVisibleAsync(org);
+
+        var cb = FindOrgCheckBox(Tree, org);
+        sb.AppendLine($"找到行内复选框(Tag=OrgSelect)：{cb is not null}" +
+                      (cb is null ? "" : $" IsThreeState={cb.IsThreeState} IsEnabled={cb.IsEnabled}"));
+        if (cb is null) { sb.AppendLine("    找不到该行的复选框（未渲染？），跳过"); return; }
+
+        // —— 第一组自检：绑定方向 ——
+        // "点了没对号"有两类根因：① 点击循环顺序与我假设的不同；② 绑定压根没生效（方向不对）。
+        // 先花两步把绑定排除掉，后面的点击结果才好解读。
+        sb.AppendLine("--- 绑定自检 A（控件→模型，验 TwoWay 回写）");
+        cb.IsChecked = true;
+        await Task.Delay(150);
+        sb.AppendLine($"    设 cb=True 后 模型={Str(org.IsChecked)}（True=回写正常，否则绑定没生效）");
+
+        sb.AppendLine("--- 绑定自检 B（模型→控件，验推送方向）");
+        org.SetSubtreeChecked(false);
+        await Task.Delay(150);
+        var afterFalse = cb.IsChecked;
+        org.SetSubtreeChecked(true);
+        await Task.Delay(150);
+        sb.AppendLine($"    设模型=False 后 cb={Str(afterFalse)}；设模型=True 后 cb={Str(cb.IsChecked)}" +
+                      $"（跟着变=推送正常）");
+
+        // 复位到"未选"，让接下来的点击从干净初值开始
+        await ViewModel.Monitor.ResetTreeChecksAsync();
+        await Task.Delay(250);
+        sb.AppendLine($"--- 复位后：cb={Str(cb.IsChecked)} 模型={Str(org.IsChecked)}");
+
+        // —— 真实键盘输入（空格切换 CheckBox），走的就是用户输入那条路径 ——
+        cb.Focus(FocusState.Programmatic);
+        sb.AppendLine($"给复选框设焦点：FocusState={cb.FocusState}");
+        sb.AppendLine($"--- 点击前：cb={Str(cb.IsChecked)} 模型={Str(org.IsChecked)}");
+        PressSpace();                     // 真实键盘事件（keydown + keyup）
+        await Task.Delay(800);            // 让 Post 出去的 VM 联动落地
+
+        int checkedVehicles = org.DescendantsAndSelf().OfType<VehicleNode>()
+                                 .Count(v => v.Id != 0 && v.IsChecked == true);
+        int loadedVehicles = org.DescendantsAndSelf().OfType<VehicleNode>().Count(v => v.Id != 0);
+        int kidsChecked = org.CompanyChildren.Count(c => c.IsChecked == true);
+        var q = ViewModel.Monitor.Feed.Query;
+        sb.AppendLine($"--- 点击后：cb={Str(cb.IsChecked)} 模型={Str(org.IsChecked)} " +
+                      $"下级组织已勾={kidsChecked}/{org.CompanyChildren.Count()} " +
+                      $"子树车辆(已加载/已勾)={loadedVehicles}/{checkedVehicles} " +
+                      $"Feed.Count={ViewModel.Monitor.Feed.Count} Ids={q.Ids.Count} " +
+                      $"CompanyId={q.CompanyId} NoResults={q.NoResults}");
+    }
+
+    // ---------------- 真实输入注入（仅诊断路径使用） ----------------
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, IntPtr dwExtraInfo);
+
+    private const byte VkSpace = 0x20;
+    private const uint KeyEventFKeyUp = 0x0002;
+
+    /// <summary>发一个真实的空格键（按下 + 抬起）。空格是 CheckBox 的标准切换键，
+    /// 走的是与鼠标点击同一条框架路径（OnToggle → 翻转 → 回写 → Raise Click）。</summary>
+    private static void PressSpace()
+    {
+        keybd_event(VkSpace, 0, 0, IntPtr.Zero);
+        keybd_event(VkSpace, 0, KeyEventFKeyUp, IntPtr.Zero);
+    }
+
+    /// <summary>保留：沿继承链逐级查找实例方法（含非公共）的反射助手。
+    /// 当前 WinUI 3 的 C# 投影里并没有 <c>OnClick</c>（WinRT 不暴露 protected 成员），
+    /// 所以真实点击只能靠输入注入，但这个方法留着做取证时的备选手段。
+    ///
+    /// <c>Type.GetMethod(name, NonPublic|Instance)</c> 只在<b>当前类型</b>里找非公共成员，
+    /// 基类的 protected 方法永远搜不到 —— 必须用 DeclaredOnly 逐级向上。
+    /// </summary>
+    private static System.Reflection.MethodInfo? FindMethodInHierarchy(Type type, string name)
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;
+        for (var t = type; t is not null; t = t.BaseType)
+        {
+            var m = t.GetMethod(name, flags);
+            if (m is not null) return m;
+        }
+        return null;
     }
 
     /// <summary>
@@ -267,14 +480,18 @@ public sealed partial class CompanyTreePanel : UserControl
         }
     }
 
-    /// <summary>在树的可视子树里找某个组织节点所在行的 CheckBox（DataContext 命中即可）。</summary>
+    /// <summary>在树的可视子树里找某个组织节点<b>所在行我们的</b>复选框。
+    /// ⚠ 必须同时匹配 <c>DataContext</c> 与 <c>Tag="OrgSelect"</c>：TreeViewItem 自带一个隐藏的多选框
+    /// （Margin=10,0、MinWidth=32、平时 Opacity=0），它的 <c>DataContext</c> 也继承自节点，
+    /// 会先于我们的行内复选框被找到，导致测到的是内置框、根本没走 <see cref="OrgCheck_Click"/>。</summary>
     private static CheckBox? FindOrgCheckBox(DependencyObject root, CompanyNode org)
     {
         int n = VisualTreeHelper.GetChildrenCount(root);
         for (int i = 0; i < n; i++)
         {
             var child = VisualTreeHelper.GetChild(root, i);
-            if (child is CheckBox cb && ReferenceEquals(cb.DataContext, org)) return cb;
+            if (child is CheckBox cb && ReferenceEquals(cb.DataContext, org) &&
+                (cb.Tag as string) == "OrgSelect") return cb;
             var hit = FindOrgCheckBox(child, org);
             if (hit is not null) return hit;
         }

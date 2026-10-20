@@ -53,9 +53,11 @@ public abstract class OrgNodeBase : ObservableObject
     //   · <see cref="SetSubtreeChecked"/>：把本级及其整棵子树置成确定值（用于"勾/取消整支"）。
     //   · <see cref="RecomputeAncestors"/>：沿父链向上，按子节点实际勾选态重算每个父组织
     //     （全 true→true；全 false→false；混合或含 null→null），这是"父级变部分选择"的来源。
-    private bool? _isChecked;
+    private bool? _isChecked = false;
 
-    /// <summary>三态勾选态。组织节点可为 null（部分选择）；车辆叶子恒为 true/false。</summary>
+    /// <summary>三态勾选态。组织节点可为 null（部分选择）；车辆叶子恒为 true/false。
+    /// 默认 false（未选）—— 否则 bool? 的 null 会被 IsThreeState=True 的复选框渲染成"半选框"，
+    /// 导致一启动所有组织都显示成部分选择。</summary>
     public bool? IsChecked
     {
         get => _isChecked;

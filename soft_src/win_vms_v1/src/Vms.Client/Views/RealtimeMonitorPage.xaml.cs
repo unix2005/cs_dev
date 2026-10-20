@@ -89,8 +89,9 @@ public sealed partial class RealtimeMonitorPage : Page
             return;
         }
 
-        // 让树上的复选框也同步勾上，保持 UI 与数据范围一致
+        // 让树上的复选框也同步勾上，保持 UI 与数据范围一致；并回溯父组织（可能变部分选择）
         vehicle.IsChecked = true;
+        vehicle.RecomputeAncestors();
         _ = ViewModel.Monitor.UpdateVehicleSelectionAsync(vehicle, true);
     }
 

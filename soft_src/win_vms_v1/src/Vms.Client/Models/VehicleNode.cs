@@ -75,7 +75,7 @@ public sealed class VehicleNode : OrgNodeBase
     /// 车辆是叶子，只承担 true/false 两态；但类型统一为 <c>bool?</c> 与组织节点的三态共用基类方法。
     /// 勾上/取消一台车后，应由调用方触发 <see cref="OrgNodeBase.RecomputeAncestors"/>，
     /// 让父组织随之变成"部分选择"(null) 或回满/回空 —— 这是三态树的关键一环。</summary>
-    public bool? IsChecked
+    public new bool? IsChecked
     {
         get => base.IsChecked;
         set => base.IsChecked = value;

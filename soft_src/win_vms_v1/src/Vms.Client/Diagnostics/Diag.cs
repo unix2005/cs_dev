@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace Vms.Client.Diagnostics;
 
 /// <summary>
@@ -39,7 +41,47 @@ internal static class Diag
     public static bool TreeSmokeTest => Has("treetest");
     public static bool VehicleSelectionCheck => Has("treecheck");
     public static bool FontCheck => Has("fontcheck");
+    /// <summary>三态演示：启动后让某个含≥2下级的组织进入"部分选择"(null)，便于截图看半选框。</summary>
+    public static bool TriStateDemo => Has("tristate");
+
+    /// <summary>
+    /// 组织复选框点击探针：启动后用**框架自己的点击处理器**（反射调 <c>ToggleButton.OnClick</c>）
+    /// 真实点某个组织复选框三次，逐步记录控件值/模型值/联动结果（写 diagtrace.log）。
+    /// 存在的理由：三态 CheckBox 的"点击循环顺序"与"TwoWay 回写时机"都是运行期行为，
+    /// 靠读代码推不出来（本项目已在"点了没反应/对号不显示"上栽过一轮，就是推理代替实测的代价）。
+    /// </summary>
+    public static bool OrgClickProbe => Has("orgclick");
 
     /// <summary>是否处于任意诊断模式。</summary>
     public static bool IsActive => Modes.Length > 0;
+
+    private static readonly List<string> TraceLines = [];
+    private static readonly object TraceLock = new();
+
+    /// <summary>诊断打点。仅在 VMS_DIAG 非空时记录 —— 正常运行零开销。</summary>
+    public static void Log(string line)
+    {
+        if (!IsActive) return;
+        lock (TraceLock) TraceLines.Add($"[{DateTime.Now:HH:mm:ss.fff}] {line}");
+    }
+
+    /// <summary>把打点落盘到 <c>%LocalAppData%\Vms.Client\diagtrace.log</c>。</summary>
+    public static void FlushTrace()
+    {
+        if (!IsActive) return;
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client");
+            Directory.CreateDirectory(dir);
+            lock (TraceLock)
+                File.WriteAllText(Path.Combine(dir, "diagtrace.log"),
+                                  string.Join(Environment.NewLine, TraceLines),
+                                  new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        }
+        catch
+        {
+            // 诊断设施绝不能成为崩溃源
+        }
+    }
 }
