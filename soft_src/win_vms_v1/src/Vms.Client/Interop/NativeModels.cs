@@ -1,0 +1,143 @@
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace Vms.Client.Interop;
+
+/// <summary>
+/// 与 <c>native/include/vms_api.h</c> 一一对应的托管结构体。
+///
+/// 铁律：
+///  1. 字段顺序、类型宽度、对齐（Pack=8）必须与 C 头文件完全一致；
+///  2. 结构体里 <b>只放 blittable / unmanaged 类型</b>（uint/float/double/fixed byte[]），
+///     不要放 bool、string、class —— 一旦有托管引用字段，结构体就不可 blit，
+///     托管数组与 C 数组之间只能逐元素 marshal，35k 行表格会直接被拖死；
+///  3. 启动时用 <see cref="AbiGuard"/> 与本机 DLL 回报的 sizeof 交叉校验，不一致直接失败，
+///     绝不允许"带着错误布局继续跑"（那是内存越界最难查的一类 bug）。
+/// </summary>
+internal enum NativeStatus
+{
+    Ok = 0,
+    InvalidArg = -1,
+    NoMemory = -2,
+    NotFound = -3,
+    BufferSmall = -4,
+    NotConnected = -5,
+    Timeout = -6,
+    AbiMismatch = -7,
+    Internal = -8,
+}
+
+/// <summary>对应头文件 <c>vms_struct_kind</c>，用于启动时的结构体尺寸自检。</summary>
+internal enum NativeStructKind
+{
+    AbiInfo = 1,
+    Stats = 2,
+    Company = 3,
+    Vehicle = 4,
+    Query = 5,
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal struct NativeAbiInfo
+{
+    public uint AbiVersion;
+    public uint StructSize;
+    public uint VerMajor;
+    public uint VerMinor;
+    public uint VerPatch;
+    public uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal struct NativeStats
+{
+    public uint Total;
+    public uint Online;
+    public uint Offline;
+    public uint Excluded;
+    public uint AlarmUnhandled;
+    public float OnlineRate;
+    public uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeCompany
+{
+    public const int TextMax = 64;
+
+    public uint Id;
+    public uint ParentId;
+    public uint Online;
+    public uint Count;
+    public uint ChildCount;
+    public uint Reserved;
+    public fixed byte Name[TextMax];
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeVehicle
+{
+    public const int CodeMax = 24;
+    public const int PlateMax = 16;
+    public const int TextMax = 64;
+    public const int TimeMax = 24;
+    public const int IssueMax = 40;
+
+    public uint Id;
+    public uint Online;
+    public uint OfflineSeconds;
+    public uint AlarmFlags;
+    public float SpeedKph;
+    public double Lon;
+    public double Lat;
+    public fixed byte SelfCode[CodeMax];
+    public fixed byte Plate[PlateMax];
+    public fixed byte Time[TimeMax];
+    public fixed byte Location[TextMax];
+    public fixed byte Day[TimeMax];
+    public fixed byte Issue[IssueMax];
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeQuery
+{
+    public const int QueryMaxIds = 256;   // 必须与 vms_api.h 的 VMS_QUERY_MAX_IDS 一致
+
+    public uint CompanyId;
+    public uint Offset;
+    public uint Limit;
+    public uint OnlineOnly;
+    public uint AlarmOnly;
+    public uint AlarmMask;
+    public uint Reserved;
+    public fixed byte Keyword[NativeVehicle.TextMax];
+    public fixed uint Ids[QueryMaxIds];
+    public uint IdCount;
+}
+
+/// <summary>从 <c>fixed byte[]</c> 读 UTF-8 字符串的小工具，零分配读取路径。</summary>
+internal static unsafe class Utf8
+{
+    public static string Read(byte* p, int maxBytes)
+    {
+        if (p is null || maxBytes <= 0) return string.Empty;
+        var span = new ReadOnlySpan<byte>(p, maxBytes);
+        int len = span.IndexOf((byte)0);
+        if (len < 0) len = maxBytes;
+        return len == 0 ? string.Empty : Encoding.UTF8.GetString(span[..len]);
+    }
+
+    public static void Write(byte* dst, int maxBytes, string? value)
+    {
+        if (dst is null || maxBytes <= 0) return;
+        var span = new Span<byte>(dst, maxBytes);
+        span.Clear();
+        if (string.IsNullOrEmpty(value)) return;
+
+        var bytes = Encoding.UTF8.GetBytes(value);
+        int n = Math.Min(bytes.Length, maxBytes - 1);
+        // 不要把多字节字符截成半个（否则 native 侧逆解码会拿到乱码）
+        while (n > 0 && n < bytes.Length && (bytes[n] & 0xC0) == 0x80) n--;
+        bytes.AsSpan(0, n).CopyTo(span);
+    }
+}

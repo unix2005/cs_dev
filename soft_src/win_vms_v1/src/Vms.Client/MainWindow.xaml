@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Vms.Client.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Vms.Client.Controls">
+
+    <!--
+      主窗口骨架（WinUI Gallery 版面）：
+        ① AppHeader   浅色标题栏 + 命令条
+        ② 主体        导航栏 | 可拖拽分隔条 | 页面 Frame
+        ③ 状态栏      后端来源 + 车辆统计
+
+      注意：Window 的根节点不是 FrameworkElement，顶层**不能**用 {x:Bind}
+      （代码生成会调 SetDataRoot(this) 而它要求 FrameworkElement）。
+      所以这里统一用 {Binding}，数据上下文在构造函数里挂到 RootGrid 上。
+    -->
+    <Grid x:Name="RootGrid" Background="{StaticResource ShellBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <controls:AppHeader x:Name="Header" Grid.Row="0" ActionRequested="Header_ActionRequested" />
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <!-- 左栏要装下导航 + 组织/车辆树（车牌要完整显示），比纯导航宽一些 -->
+                <ColumnDefinition Width="300" MinWidth="220" MaxWidth="560" />
+                <ColumnDefinition Width="6" />
+                <ColumnDefinition Width="*" MinWidth="460" />
+            </Grid.ColumnDefinitions>
+
+            <controls:NavRail x:Name="Nav" Grid.Column="0" NavigationRequested="Nav_NavigationRequested" />
+
+            <!-- 导航栏 ↔ 内容区：可拖拽 -->
+            <controls:SplitterBar Grid.Column="1" />
+
+            <Frame x:Name="ContentFrame" Grid.Column="2" />
+        </Grid>
+
+        <!-- ============================ 状态栏 ============================ -->
+        <Border Grid.Row="2" Height="{StaticResource StatusBarHeight}"
+                Background="{StaticResource ToolBarBrush}"
+                BorderBrush="{StaticResource DividerBrush}"
+                BorderThickness="0,1,0,0">
+            <Grid Margin="12,0">
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Ellipse Width="7" Height="7" VerticalAlignment="Center"
+                             Fill="{Binding UsingNativeBackend, Converter={StaticResource NativeDotBrush}}" />
+                    <TextBlock Text="{Binding StatusMessage}" FontSize="11"
+                               Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis" MaxWidth="560"
+                               ToolTipService.ToolTip="{Binding NativeDiagnostics}" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="14" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <TextBlock Text="车辆总数" FontSize="11" Foreground="{StaticResource TextHintBrush}" />
+                        <TextBlock Text="{Binding Stats.TotalText}" FontSize="11"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource TextPrimaryBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <TextBlock Text="在线数" FontSize="11" Foreground="{StaticResource TextHintBrush}" />
+                        <TextBlock Text="{Binding Stats.OnlineText}" FontSize="11"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource StatusOnlineBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <TextBlock Text="离线数" FontSize="11" Foreground="{StaticResource TextHintBrush}" />
+                        <TextBlock Text="{Binding Stats.OfflineText}" FontSize="11"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource TextPrimaryBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <TextBlock Text="不纳入统计" FontSize="11" Foreground="{StaticResource TextHintBrush}" />
+                        <TextBlock Text="{Binding Stats.ExcludedText}" FontSize="11"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource TextPrimaryBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <TextBlock Text="上线率" FontSize="11" Foreground="{StaticResource TextHintBrush}" />
+                        <TextBlock Text="{Binding Stats.OnlineRateText}" FontSize="11"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource AccentBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <TextBlock Text="未处理报警" FontSize="11" Foreground="{StaticResource TextHintBrush}" />
+                        <TextBlock Text="{Binding Stats.AlarmUnhandledText}" FontSize="11"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource AlarmBrush}" />
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

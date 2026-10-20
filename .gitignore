@@ -58,3 +58,34 @@ lib/libcjson.so.1.7.19
 lib/libcjson.so.1
 include/cJSON_Utils.h
 include/cJSON.h
+
+# ============================================================
+# soft_src/win_vms_v1  (WinUI 3 / .NET 客户端 + C native 库)
+# 只保留源代码与必要资源，忽略构建产物、IDE 缓存与调试截图
+# ============================================================
+soft_src/win_vms_v1/.vs/
+soft_src/win_vms_v1/.nuget/
+soft_src/win_vms_v1/.dumps/
+soft_src/win_vms_v1/.workbuddy/
+
+# .NET / WinUI 构建中间产物
+soft_src/win_vms_v1/src/**/bin/
+soft_src/win_vms_v1/src/**/obj/
+soft_src/win_vms_v1/src/**/bin/**
+soft_src/win_vms_v1/src/**/obj/**
+*.user
+*.suo
+*.userprefs
+.vsconfig
+
+# native C 库的编译产物（源码 native/src 与头文件 native/include 保留）
+soft_src/win_vms_v1/native/build/
+
+# 调试 / UI 走查截图（根目录临时截图）
+soft_src/win_vms_v1/shot_*.png
+soft_src/win_vms_v1/zoom_check.png
+
+# UI 设计参考截图（不是构建所需资源；真正的 app 图标在 icon/3/）
+soft_src/win_vms_v1/icon/1/
+soft_src/win_vms_v1/icon/2/
+soft_src/win_vms_v1/icon/4/

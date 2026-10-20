@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  VmsTheme.xaml — 全站视觉令牌（WinUI Gallery 风格）。
+
+  设计取向参考 microsoft/WinUI-Gallery：
+    · 中性浅灰底（#F3F3F3）+ 白色卡片，靠 1px 细边框和圆角分层，不用大面积色块；
+    · 强调色只用一处（#0067C0），出现在选中指示条、焦点、链接，不铺满标题栏；
+    · 层级靠字重／字号／灰阶拉开，不靠颜色；
+    · 圆角统一 4（控件）/ 8（卡片），贴近 Fluent 2 规范。
+
+  主题策略：**固定浅色**。值班场景长期亮屏，跟随系统暗色会让地图与表格对比度变差。
+  若要支持暗色，把这里换成 ThemeDictionaries 即可 —— 上层全部走 StaticResource。
+
+  状态色（按业务要求）：
+    · 在线 = 蓝  StatusOnlineBrush
+    · 离线 = 灰  StatusOfflineBrush
+    · 报警 = 红  AlarmBrush
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ============================ 强调色 ============================ -->
+    <Color x:Key="AccentColor">#FF0067C0</Color>
+
+    <SolidColorBrush x:Key="AccentBrush" Color="#FF0067C0" />
+    <SolidColorBrush x:Key="AccentStrongBrush" Color="#FF00519B" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#FFE8F1FB" />
+    <SolidColorBrush x:Key="AccentSubtleBrush" Color="#FFDCE9F7" />
+    <SolidColorBrush x:Key="TransparentBrush" Color="Transparent" />
+
+    <!-- 兼容既有引用：品牌色 == 强调色 -->
+    <SolidColorBrush x:Key="BrandBrush" Color="#FF0067C0" />
+    <SolidColorBrush x:Key="BrandStrongBrush" Color="#FF00519B" />
+    <SolidColorBrush x:Key="BrandSoftBrush" Color="#FFE8F1FB" />
+
+    <!-- ============================ 表面 / 描边 ============================ -->
+    <!-- Gallery 的观感来源：外壳是浅灰，内容是一张白卡片 -->
+    <SolidColorBrush x:Key="ShellBackgroundBrush" Color="#FFF3F3F3" />
+    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="PanelAltBackgroundBrush" Color="#FFFAFAFA" />
+    <SolidColorBrush x:Key="CardBackgroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="NavRailBackgroundBrush" Color="#FFF3F3F3" />
+    <SolidColorBrush x:Key="TitleBarBrush" Color="#FFF7F7F7" />
+    <SolidColorBrush x:Key="ToolBarBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="SubtleFillBrush" Color="#0F000000" />
+    <SolidColorBrush x:Key="SubtleHoverBrush" Color="#14000000" />
+    <SolidColorBrush x:Key="SubtlePressedBrush" Color="#1F000000" />
+
+    <SolidColorBrush x:Key="BorderBrush" Color="#FFE5E5E5" />
+    <SolidColorBrush x:Key="BorderStrongBrush" Color="#FFD6D6D6" />
+    <SolidColorBrush x:Key="DividerBrush" Color="#FFEBEBEB" />
+
+    <!-- ============================ 文本 ============================ -->
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FF1A1A1A" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#FF5C5C5C" />
+    <SolidColorBrush x:Key="TextHintBrush" Color="#FF8A8A8A" />
+    <SolidColorBrush x:Key="TextOnBrandBrush" Color="#FFFFFFFF" />
+
+    <!-- ============================ 业务状态色 ============================ -->
+    <SolidColorBrush x:Key="StatusOnlineBrush" Color="#FF1F7AE0" />
+    <SolidColorBrush x:Key="StatusOfflineBrush" Color="#FF9A9A9A" />
+    <SolidColorBrush x:Key="AlarmBrush" Color="#FFC42B1C" />
+    <SolidColorBrush x:Key="AlarmSoftBrush" Color="#FFFDECEA" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#FF9D5D00" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#FF0F7B0F" />
+
+    <!-- ============================ 表格 ============================ -->
+    <SolidColorBrush x:Key="GridHeaderBackgroundBrush" Color="#FFFAFAFA" />
+    <SolidColorBrush x:Key="GridRowAltBackgroundBrush" Color="#FFFAFAFA" />
+    <SolidColorBrush x:Key="GridRowHoverBrush" Color="#FFF3F6FA" />
+    <SolidColorBrush x:Key="GridRowSelectedBrush" Color="#FFE8F1FB" />
+    <SolidColorBrush x:Key="GridLineBrush" Color="#FFEFEFEF" />
+
+    <!-- ============================ 尺寸 ============================ -->
+    <x:Double x:Key="TitleBarHeight">48</x:Double>
+    <x:Double x:Key="ToolBarHeight">44</x:Double>
+    <x:Double x:Key="StatusBarHeight">28</x:Double>
+    <x:Double x:Key="NavItemHeight">36</x:Double>
+    <x:Double x:Key="GridRowHeight">32</x:Double>
+    <x:Double x:Key="SplitterThickness">6</x:Double>
+
+    <!--
+      ⚠ 类型陷阱（已踩过一次）：上面这些都是 x:Double，只能赋给 double 类型的属性
+        （Border.Height、Style 的 Setter、ListViewItem.Height …）。
+
+      千万不要拿去赋 RowDefinition.Height / ColumnDefinition.Width ——
+      那两个属性的类型是 **GridLength**，赋 Double 会在运行时抛
+      XamlParseException（"Double cannot be assigned to type GridLength"），
+      而且**编译期完全不报错**，只在导航到该页时才炸。
+
+      所以行列尺寸请直接在 XAML 里写字面量（如 Height="34"），不要做成 Double 令牌。
+    -->
+
+    <CornerRadius x:Key="CardCornerRadius">8</CornerRadius>
+    <CornerRadius x:Key="ControlCornerRadius">4</CornerRadius>
+
+    <!-- ============================ 字体 ============================ -->
+    <!--
+        全局统一用 Noto Sans SC（思源黑体），未安装则回退微软雅黑。
+        字体栈按优先级排列，WinUI 会取第一个系统里存在的：
+          Noto Sans SC → Microsoft YaHei UI → 其它中文/西文回退。
+        ⚠ 不要再往里塞 Segoe UI Variable Text 之类：它是西文无衬线，中文字形缺失，
+          放在思源/雅黑之后只会在"两者都缺字"时兜底，不会抢中文显示。
+    -->
+    <FontFamily x:Key="AppFontFamily">Noto Sans SC, Microsoft YaHei UI, Microsoft YaHei, PingFang SC, Segoe UI, sans-serif</FontFamily>
+
+    <!--
+        数字列专用字体族。思源黑体的数字本身是<b>等宽</b>（实测 advance 全为 521/1000 em），
+        所以首选它既保持列对齐、观感又与正文统一；
+        若目标机器没装思源，退到微软雅黑（数字等宽），再退 Cascadia/Consolas（等宽西文）。
+    -->
+    <FontFamily x:Key="NumberFontFamily">Noto Sans SC, Microsoft YaHei UI, Cascadia Mono, Consolas, monospace</FontFamily>
+
+    <!-- ============================ 文本样式 ============================ -->
+    <Style x:Key="TableCellText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="Margin" Value="10,0,4,0" />
+    </Style>
+
+    <Style x:Key="TableNumericText" TargetType="TextBlock" BasedOn="{StaticResource TableCellText}">
+        <Setter Property="FontFamily" Value="{StaticResource NumberFontFamily}" />
+        <Setter Property="HorizontalAlignment" Value="Right" />
+        <Setter Property="Margin" Value="4,0,10,0" />
+    </Style>
+
+    <Style x:Key="GridHeaderText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+        <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="Margin" Value="10,0,4,0" />
+    </Style>
+
+    <!--
+      居中变体（需求：表头与数据统一居中）。
+
+      为什么不能只在控件上写 HorizontalAlignment="Center"：
+      上面几个基础样式都带了**非对称 Margin**（TableCellText 是 10,0,4,0 左宽右窄，
+      TableNumericText 干脆是右对齐 + 4,0,10,0）。TextBlock 的对齐是"在 Margin 之间的
+      剩余空间里居中"，左右不等宽 → 视觉上仍然偏左，看着像没居中。
+      所以居中必须**连 Margin 一起对称化**，这正是这两个样式存在的理由。
+    -->
+    <Style x:Key="TableCellTextCenter" TargetType="TextBlock" BasedOn="{StaticResource TableCellText}">
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="Margin" Value="4,0,4,0" />
+    </Style>
+
+    <Style x:Key="TableNumericTextCenter" TargetType="TextBlock" BasedOn="{StaticResource TableNumericText}">
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="Margin" Value="4,0,4,0" />
+    </Style>
+
+    <Style x:Key="GridHeaderTextCenter" TargetType="TextBlock" BasedOn="{StaticResource GridHeaderText}">
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="Margin" Value="4,0,4,0" />
+    </Style>
+
+    <!-- 分组小标题：Gallery 侧栏里 "Controls" / "Recently added" 那种 -->
+    <Style x:Key="SectionHeaderText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+        <Setter Property="Foreground" Value="{StaticResource TextHintBrush}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="PanelTitleText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="PageTitleText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="20" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="CaptionText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+        <Setter Property="Foreground" Value="{StaticResource TextHintBrush}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+
+    <!-- ============================ 控件样式 ============================ -->
+
+    <!--
+      工具条图标按钮。刻意**不重写 ControlTemplate**：
+      WinUI 默认模板已经带了圆角、PointerOver/Pressed 的浅灰浮层（正是 Gallery 的手感），
+      自己仿一套反而会丢掉键盘焦点框和无障碍行为。
+    -->
+    <Style x:Key="ToolBarIconButton" TargetType="Button">
+        <Setter Property="Width" Value="36" />
+        <Setter Property="Height" Value="32" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource ControlCornerRadius}" />
+        <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets" />
+        <Setter Property="FontSize" Value="15" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+    </Style>
+
+    <!-- 侧栏一级项：整行可点、内容左对齐，选中态由 ViewModel 通过 Background/Foreground 注入 -->
+    <Style x:Key="NavItemButton" TargetType="Button">
+        <Setter Property="Height" Value="{StaticResource NavItemHeight}" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="Margin" Value="4,1" />
+        <Setter Property="CornerRadius" Value="{StaticResource ControlCornerRadius}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}" />
+    </Style>
+
+    <Style x:Key="NavSubItemButton" TargetType="Button" BasedOn="{StaticResource NavItemButton}">
+        <Setter Property="Height" Value="32" />
+        <Setter Property="Padding" Value="34,0,8,0" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Margin" Value="4,0" />
+    </Style>
+
+    <!-- 面板内的小图标按钮（地图缩放、面板折叠） -->
+    <Style x:Key="PanelIconButton" TargetType="Button">
+        <Setter Property="Width" Value="30" />
+        <Setter Property="Height" Value="30" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource ControlCornerRadius}" />
+        <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Background" Value="#F2FFFFFF" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderStrongBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+    </Style>
+
+    <!-- 表格行容器：固定行高是 ListView 虚拟化高效的前提 -->
+    <Style x:Key="GridRowContainer" TargetType="ListViewItem">
+        <Setter Property="Height" Value="{StaticResource GridRowHeight}" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="MinHeight" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="CornerRadius" Value="0" />
+    </Style>
+
+    <!--
+      表格行容器（不可 Tab 聚焦版）：用于"点单元格即复制"的表。
+
+      为什么改这一处：ListViewItem 默认模板会为"选中"画一层 SelectionHighlight 覆盖在
+      Background 之上，而本项目的隔行底色（斑马纹）正是写在 ListViewItem.Background 上的
+      —— 一旦某行被选中，那一行的斑马纹就被盖掉，视觉上出现"点一下就断一截"。
+      这里配合 ListView 的 SelectionMode="None"（行根本不可选中），
+      再把 IsTabStop 关掉，避免键盘 Tab 时某个行被高亮聚焦、同样盖掉底色。
+
+      ⚠ 别写 SelectionHighlightMode：那是 WinUI 2 / UWP 的 API，WinUI 3 已移除，
+        写上去直接编译报 WMC0090 Unknown member。
+    -->
+    <Style x:Key="GridRowContainerNoSelect" TargetType="ListViewItem" BasedOn="{StaticResource GridRowContainer}">
+        <Setter Property="IsTabStop" Value="False" />
+    </Style>
+
+    <!--
+      卡片：Gallery 里内容区的容器。白底 + 1px 细边 + 8 圆角，
+      外加一层极浅的投影（Fluent 的 Card 规范就是"几乎看不见"的阴影）。
+    -->
+    <Style x:Key="CardBorder" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource CardBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="{StaticResource CardCornerRadius}" />
+    </Style>
+
+    <Style x:Key="PanelCardBorder" TargetType="Border" BasedOn="{StaticResource CardBorder}" />
+
+    <!-- 树节点右侧的计数徽标 -->
+    <Style x:Key="CountBadgeBorder" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource AccentSoftBrush}" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="6,0" />
+        <Setter Property="MinWidth" Value="30" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+</ResourceDictionary>

@@ -1,0 +1,6 @@
+ #可在powershell中执行
+ cd E:\win_e\cs_dev\soft_src\win_vms_v1; 
+ . .\scripts\env.ps1;  
+ dotnet build src\Vms.Client\Vms.Client.csproj -p:Platform=x64 -c Debug
+ 
+ 

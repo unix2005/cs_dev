@@ -1,0 +1,161 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+namespace Vms.Client.Interop;
+
+/// <summary>
+/// P/Invoke 声明层。只做「签名 ↔ 导出符号」的机械映射，不含业务逻辑。
+///
+/// 用 <c>LibraryImport</c>（.NET 7+ 源生成器）而不是 <c>DllImport</c> 的原因：
+///   - 编译期生成 marshalling 代码，省掉运行时 IL stub，调用开销更低；
+///   - 字符串统一走 UTF-8（Windows 上 DllImport 默认 ANSI，中文必然踩坑）；
+///   - 未来若启用 NativeAOT / 裁剪，源生成版本不受影响。
+/// </summary>
+internal static partial class NativeMethods
+{
+    public const string LibraryName = "vms_core";
+
+    // ----------------------------- 生命周期 / 自检 -----------------------------
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_abi_version")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial uint vms_abi_version();
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_version_string")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial IntPtr vms_version_string();
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_struct_size")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial nuint vms_struct_size(int kind);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_create", StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_create(string? configJson, out IntPtr ctx);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_destroy")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial void vms_destroy(IntPtr ctx);
+
+    // --------------------------------- 会话 ----------------------------------
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_connect", StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_connect(IntPtr ctx, string? endpoint);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_disconnect")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_disconnect(IntPtr ctx);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_is_connected")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_is_connected(IntPtr ctx);
+
+    // --------------------------------- 数据 ----------------------------------
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_get_stats")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_get_stats(IntPtr ctx, out NativeStats stats);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_get_companies")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_get_companies(IntPtr ctx, IntPtr buffer, nuint cap, out nuint count);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_query_vehicles")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_query_vehicles(IntPtr ctx, in NativeQuery query, IntPtr buffer, nuint cap, out nuint count);
+
+    // ------------------------------- 推送 / 日志 -------------------------------
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_subscribe")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_subscribe(IntPtr ctx, IntPtr callback, IntPtr userData);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_unsubscribe")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_unsubscribe(IntPtr ctx);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_last_error")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial IntPtr vms_last_error(IntPtr ctx);
+
+    // ------------------------------- 错误描述 --------------------------------
+
+    public static string DescribeError(IntPtr ctx, int code)
+    {
+        if (code >= 0) return "OK";
+        var name = Enum.IsDefined(typeof(NativeStatus), code)
+            ? ((NativeStatus)code).ToString()
+            : code.ToString();
+        var ptr = vms_last_error(ctx);
+        var detail = ptr == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(ptr);
+        return string.IsNullOrEmpty(detail) ? name : $"{name} — {detail}";
+    }
+}
+
+/// <summary>
+/// 决定 <c>vms_core.dll</c> 从哪里加载。
+///
+/// 不用裸 DllImport 依赖系统搜索路径，原因有两个：
+///   - 安全：Windows 的 DLL 搜索顺序会优先命中 exe 同目录/PATH，攻击者放一个同名
+///     DLL 就能劫持（DLL planting）。这里改成只从我们显式枚举的受控目录加载，
+///     并且是绝对路径 <c>NativeLibrary.Load</c>。
+///   - 可维护：开发期让 exe 能直接跑到 <c>native/build</c> 的输出。
+/// </summary>
+internal static class NativeLibraryResolver
+{
+    private static readonly object Gate = new();
+    private static bool _registered;
+    private static string? _resolvedPath;
+
+    /// <summary>已解析到的 DLL 绝对路径；null 表示尚未成功解析。</summary>
+    public static string? ResolvedPath => _resolvedPath;
+
+    public static void EnsureRegistered()
+    {
+        lock (Gate)
+        {
+            if (_registered) return;
+            _registered = true;
+            // 必须在任何一次 P/Invoke 之前注册
+            NativeLibrary.SetDllImportResolver(typeof(NativeMethods).Assembly, Resolve);
+        }
+    }
+
+    private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPaths)
+    {
+        if (!string.Equals(libraryName, NativeMethods.LibraryName, StringComparison.OrdinalIgnoreCase))
+            return IntPtr.Zero;
+
+        foreach (var dir in EnumerateProbeDirectories())
+        {
+            foreach (var fileName in (string[])["vms_core.dll", "libvms_core.dll"])
+            {
+                var candidate = Path.GetFullPath(Path.Combine(dir, fileName));
+                if (!File.Exists(candidate)) continue;
+                if (NativeLibrary.TryLoad(candidate, out var handle))
+                {
+                    _resolvedPath = candidate;
+                    return handle;
+                }
+            }
+        }
+        return IntPtr.Zero; // 交给运行时按默认规则继续找，最终抛 DllNotFoundException
+    }
+
+    private static IEnumerable<string> EnumerateProbeDirectories()
+    {
+        // 1) 环境变量优先，方便灰度/多版本并存切换
+        var env = Environment.GetEnvironmentVariable("VMS_NATIVE_DIR");
+        if (!string.IsNullOrWhiteSpace(env)) yield return env;
+
+        var baseDir = AppContext.BaseDirectory;
+        yield return baseDir;                                        // 随 exe 发布（推荐）
+        yield return Path.Combine(baseDir, "runtimes", "win-x64", "native");
+        yield return Path.Combine(baseDir, "native");
+
+        // 2) 开发期：源码树里的 native/build 产物
+        yield return Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "..", "native", "build"));
+    }
+}

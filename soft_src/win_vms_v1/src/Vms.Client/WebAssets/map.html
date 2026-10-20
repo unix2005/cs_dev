@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>车辆地图 · 高德</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden;
+               font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; }
+  #map { width: 100%; height: 100vh; }   /* 容器必须有确定高度，否则地图不渲染 */
+  #boot-fail { position: absolute; inset: 0; display: none; align-items: center;
+               justify-content: center; background: #f5f5f5; color: #5c5c5c;
+               font-size: 13px; text-align: center; padding: 24px; line-height: 1.8; }
+  .pin-label { font-size: 11px; color: #1a1a1a; background: rgba(255,255,255,.92);
+               border: 1px solid #e5e5e5; border-radius: 3px; padding: 2px 5px; white-space: nowrap; }
+  /* 车辆标记：圆形描边表状态色，内部是卡通罐车图标 */
+  .veh-mk { width: 22px; height: 22px; border: 2px solid #9A9A9A; border-radius: 50%;
+           overflow: hidden; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+  .veh-mk img { width: 22px; height: 22px; display: block; }
+</style>
+
+<!--
+  ===========================================================================
+  合规说明（务必阅读）
+  ---------------------------------------------------------------------------
+  1. 境内地图服务只能用具备导航电子地图甲级测绘资质的厂商：
+     高德 / 腾讯 / 百度 / 天地图。本项目使用**高德地图 JS API 2.0**。
+  2. 国界、台湾、南海诸岛等要素由地图厂商的官方底图提供，**不得自行拼接或改绘**。
+  3. 坐标系统一使用 GCJ-02（火星坐标）。native 侧若拿到的是 WGS-84 原始 GPS 点，
+     必须在 native 层做 WGS-84 → GCJ-02 转换，不要把两套坐标混着打点。
+  4. 下面的 key 与 securityJsCode 是**客户端明文**，会被抓包。生产环境建议改为
+     后端代理 + 签名校验（见文件末尾「走代理时的改法」）。
+  ===========================================================================
+
+  ============================ 故障定位速查 ============================
+  AMap 加载不出来只有三种可能，本页会把 stage 回传给宿主，界面上就能看出是哪种：
+
+    stage = network     脚本根本没下载下来 → 网络/防火墙/离线，或 DNS 被劫持
+    stage = rejected    脚本下载成功但没注入 AMap → key 类型不对 / 安全密钥不对 /
+                        域名白名单不放行（最常见：明文 securityJsCode 必须配白名单）
+    stage = console     高德 SDK 自己打印的告警（如 INVALID_USER_SCODE）
+
+  最快的验证：浏览器打开 SDK_URL 那一行（见下方常量），
+  · 打不开 / 超时            → 网络问题
+  · 返回文本含 INVALID_USER_SCODE / INVALID_USER_KEY / USERKEY_PLAT_NOMATCH → 授权问题
+  ===========================================================================
+-->
+
+<!-- 1) 先声明 WebView2 宿主桥（桌面端） -->
+<script>
+  window.__vmsHost = (window.chrome && window.chrome.webview) ? window.chrome.webview : null;
+  window.__vmsPost = function (obj) {
+    if (window.__vmsHost) window.__vmsHost.postMessage(obj);
+    else console.log('[vms]', obj);
+  };
+
+  // 2) 劫持 console：高德 SDK 被拒时的真实原因（INVALID_USER_SCODE 等）只打在 console 里，
+  //    不劫持的话桌面端根本看不到，只能猜。必须在加载 SDK **之前**装好。
+  (function () {
+    ['log', 'info', 'warn', 'error'].forEach(function (level) {
+      var orig = console[level];
+      console[level] = function () {
+        try {
+          var text = Array.prototype.map.call(arguments, function (a) {
+            if (typeof a === 'string') return a;
+            try { return JSON.stringify(a); } catch (e) { return String(a); }
+          }).join(' ');
+          if (level === 'warn' || level === 'error')
+            window.__vmsPost({ type: 'console', level: level, text: text.slice(0, 300) });
+        } catch (e) { /* 转发失败不能影响主流程 */ }
+        if (orig) orig.apply(console, arguments);
+      };
+    });
+  })();
+
+  // 3) 密钥解析（**加载 SDK 之前**必须完成）
+  //    优先级：宿主注入值(环境变量 / amap-key.json) > 本文件内置默认值。
+  //    这样换 key 不用改源码、不用重新编译，也不会把密钥写死在交付物里。
+  var AMAP_KEY = window.__vmsAmapKey || "6626103f4a221b24d70dd94dcb460dc6";
+  var AMAP_SCODE = window.__vmsAmapJsCode || "954d1fcb47f15fb349f02dbe5f759db8";
+
+  // 安全密钥（JS API 2.0 要求，明文方式必须配合控制台的域名白名单）
+  window._AMapSecurityConfig = { securityJsCode: AMAP_SCODE };
+
+  // 4) SDK 地址（改代理时只需要动这一行，见文件末尾说明）
+  window.__vmsSdkUrl =
+    "https://webapi.amap.com/maps?v=2.0&key=" + encodeURIComponent(AMAP_KEY);
+</script>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="boot-fail"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var SDK_URL = window.__vmsSdkUrl;
+
+  var fail = function (stage, message) {
+    var el = document.getElementById('boot-fail');
+    el.style.display = 'flex';
+    el.textContent = message;
+    window.__vmsPost({ type: 'error', stage: stage, message: message });
+  };
+
+  // 从高德返回的脚本/提示文本里提取官方错误码，直接翻译成人话
+  function translate(text) {
+    if (!text) return '';
+    var up = text.toUpperCase();
+    if (up.indexOf('INVALID_USER_SCODE') >= 0)
+      return '安全密钥(securityJsCode)无效，或该 key 未配置域名白名单 —— 明文 securityJsCode 方式'
+           + '**必须**在控制台配置域名白名单，请把 vms.local 加进去（详见 map.html 末尾说明）。';
+    if (up.indexOf('INVALID_USER_KEY') >= 0 || up.indexOf('USERKEY_PLAT_NOMATCH') >= 0)
+      return 'key 无效或平台类型不匹配 —— 该 key 必须是「Web端(JS API)」类型，'
+           + '「Web服务」类型的 key（IP 白名单）不能用于 JS API。';
+    if (up.indexOf('INSUFFICIENT_PRIVILEGES') >= 0 || up.indexOf('1000') >= 0)
+      return 'key 权限不足（未开通 JS API 或未过审）。';
+    if (up.indexOf('DAILY_QUERY_OVER_LIMIT') >= 0)
+      return '已超出当日调用配额。';
+    return '';
+  }
+
+  function boot() {
+    if (typeof AMap !== 'undefined') { start(); return; }
+
+    // 脚本"加载成功"却没注入 AMap —— 说明服务端返回的是拒绝原因而不是 SDK。
+    // 再取一次响应体，把官方错误码捞出来（CORS 失败时退化为通用提示）。
+    var detail = '';
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', SDK_URL, false);      // 同步：这里只在故障路径上执行一次，可以接受
+      xhr.send();
+      detail = translate(xhr.responseText || '');
+    } catch (e) {
+      detail = '';   // CORS / 网络问题，拿不到响应体
+    }
+
+    fail('rejected',
+      '高德 SDK 已下载但未生效。' +
+      (detail || '通常是 key 类型不对、securityJsCode 不对，或域名白名单未放行 vms.local。') +
+      ' 可用浏览器直接打开 SDK_URL 查看高德返回的原始提示。');
+  }
+
+  function start() {
+    // 默认视野：与现有系统一致（GCJ-02）。高德用 [经度, 纬度] 顺序，别写反。
+    var map = new AMap.Map('map', {
+      viewMode: '2D',
+      zoom: 8,
+      center: [113.572906, 42.443101],
+      resizeEnable: true
+    });
+
+    map.addControl(new AMap.Scale({ position: 'LB' }));
+
+    // 车辆图标用项目自带的卡通罐车（vms_tanker.png，白底已转透明，放在 WebAssets，由 vms.local 提供）。
+    // 状态仍用"圆圈描边颜色"表达（在线蓝 / 离线灰 / 报警红），图标本体保持车型识别度。
+    function pin(color) {
+      return '<div class="veh-mk" style="border-color:' + color + '">'
+        + '<img src="vms_tanker.png" width="22" height="22" alt=""/></div>';
+    }
+
+    var PINS = {
+      online:  pin('#1F7AE0'),   // 在线 = 蓝
+      offline: pin('#9A9A9A'),   // 离线 = 灰
+      alarm:   pin('#C42B1C')    // 报警 = 红
+    };
+
+    var markers = Object.create(null);   // id -> Marker，用于增量更新而不是整层重建
+
+    function styleOf(item) {
+      return item.alarm ? 'alarm' : (item.online ? 'online' : 'offline');
+    }
+
+    function upsert(items) {
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (!it || it.lon == null || it.lat == null) continue;
+
+        var id = String(it.id);
+        var pos = [it.lon, it.lat];
+        var content = PINS[styleOf(it)];
+        var title = it.plate + ' · ' + (it.speed || '--') + 'km/h · ' + (it.location || '');
+
+        var mk = markers[id];
+        if (mk) {
+          // 已存在：只改位置和图标，不销毁重建（创建 Marker 的开销远大于改属性）
+          mk.setPosition(pos);
+          mk.setContent(content);
+          mk.setTitle(title);
+        } else {
+          mk = new AMap.Marker({
+            position: pos,
+            content: content,
+            anchor: 'center',
+            title: title
+          });
+          mk.on('click', makeClickHandler(id));
+          map.add(mk);
+          markers[id] = mk;
+        }
+      }
+    }
+
+    function makeClickHandler(id) {
+      return function () {
+        var mk = markers[id];
+        if (!mk) return;
+        var pos = mk.getPosition();
+        window.__vmsPost({
+          type: 'markerclick',
+          id: id,
+          lon: pos.getLng().toFixed(6),
+          lat: pos.getLat().toFixed(6)
+        });
+        new AMap.InfoWindow({
+          content: '<div class="pin-label">' + (mk.getTitle() || '') + '</div>',
+          offset: new AMap.Pixel(0, -30)
+        }).open(map, pos);
+      };
+    }
+
+    // 鼠标经纬度 → 回传宿主（界面左下角那行读数）
+    var lastPost = 0;
+    map.on('mousemove', function (e) {
+      var now = Date.now();
+      if (now - lastPost < 60) return;      // 限频，别让 postMessage 成为热路径
+      lastPost = now;
+      if (!e.lnglat) return;
+      window.__vmsPost({
+        type: 'pointer',
+        lon: e.lnglat.getLng().toFixed(6),
+        lat: e.lnglat.getLat().toFixed(6)
+      });
+    });
+
+    // 宿主 → 页面
+    if (window.__vmsHost) {
+      window.__vmsHost.addEventListener('message', function (e) {
+        var msg = e.data;
+        if (!msg || !msg.type) return;
+        try {
+          if (msg.type === 'vehicles') {
+            upsert(msg.items || []);
+          } else if (msg.type === 'center') {
+            map.setZoomAndCenter(msg.zoom || 14, [msg.lon, msg.lat]);
+          } else if (msg.type === 'zoom') {
+            map.setZoom(Math.max(3, Math.min(18, map.getZoom() + msg.delta)));
+          } else if (msg.type === 'clear') {
+            for (var k in markers) { map.remove(markers[k]); delete markers[k]; }
+          }
+        } catch (err) {
+          window.__vmsPost({ type: 'error', stage: 'runtime', message: String(err) });
+        }
+      });
+    }
+
+    window.__vmsPost({ type: 'ready' });
+  }
+
+  // ---- 动态加载 SDK：只有动态创建 <script> 才能拿到 onerror，
+  //      否则"网络不通"和"key 被拒"在界面上长得一模一样，没法定位。----
+  var s = document.createElement('script');
+  s.src = SDK_URL;
+  s.async = true;
+  s.onload = boot;
+  s.onerror = function () {
+    fail('network',
+      '无法下载高德 SDK（webapi.amap.com 不可达）。' +
+      '请检查：外网联通性 / 代理 / 防火墙是否放行 webapi.amap.com，' +
+      '或该机器是否在离线内网中运行（内网需自建代理，见文件末尾说明）。');
+  };
+  document.head.appendChild(s);
+
+  /*
+   ============================ 走后端代理时的改法 ============================
+   现状是「明文 securityJsCode + 域名白名单」，桌面客户端的页面域是
+   https://vms.local/ ，所以控制台必须放行 vms.local。
+
+   若要改官方推荐的代理方式（安全密钥不再落到客户端）：
+     1) 自建代理服务，把 /amap/maps 反向代理到
+        https://webapi.amap.com/maps ，并在 query 上追加
+        jscode=<你的安全密钥>（也可同时把 /amap/_AMapService 代理到 restapi.amap.com）；
+     2) 控制台域名白名单填代理域名（公网域名），不再需要 vms.local；
+     3) 本文件改两处：
+          window._AMapSecurityConfig = {
+            serviceHost: 'https://your.domain/amap/_AMapService'
+          };
+          window.__vmsSdkUrl = 'https://your.domain/amap/maps?v=2.0&key=<key>';
+   这样 key 与 jscode 都不在客户端明文暴露，域名白名单校验也天然通过。
+   ============================================================================
+  */
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Vms.Client.Controls.SplitterBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      分隔条视觉：6px 的透明命中区里居中放 1px 的细线。
+      刻意不引入 CommunityToolkit 的 GridSplitter —— 它的 Sizers 包要额外一份
+      NuGet 依赖并与 Windows App SDK 版本对齐，而这里需要的逻辑不到 120 行。
+      命中区做成 Transparent（而不是空）是必须的：空白区域不参与命中测试，否则根本拖不动。
+    -->
+    <Grid x:Name="Root" Background="Transparent">
+        <Border x:Name="Line"
+                Background="{StaticResource DividerBrush}"
+                CornerRadius="1" />
+    </Grid>
+</UserControl>

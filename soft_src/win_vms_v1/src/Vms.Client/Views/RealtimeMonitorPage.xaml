@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Vms.Client.Views.RealtimeMonitorPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Vms.Client.Controls"
+    Background="{StaticResource ShellBackgroundBrush}">
+
+    <!--
+      「实时监控」主页（WinUI Gallery 版面）。
+
+        ┌──────────────┬──────────────────────────────────┐
+        │  功能导航      │   地  图（高德，GCJ-02）          │  ← 上下可拖
+        │  ─────────    ├──────────────────────────────────┤
+        │  实时监控      │   数据页签：定位数据 / 报警数据     │
+        │   └ 组织机构树 │                                  │
+        │     └ 车辆     │                                  │
+        └──────────────┴──────────────────────────────────┘
+          左右可拖 ↑
+
+      组织/车辆树挂在左侧「实时监控」导航项下面（见 NavRail.xaml），
+      不再占本页的版面 —— 它是监控模块的一部分，不是全局导航。
+
+      两处放了自己实现的 SplitterBar（WinUI 3 核心库没有 GridSplitter）：
+        · 导航栏 ↔ 内容区   在 MainWindow.xaml；
+        · 地图   ↔ 数据页签 在下面 Row1。
+    -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ============================ 页头 ============================ -->
+        <Grid Grid.Row="0" Margin="16,14,16,8">
+            <StackPanel>
+                <TextBlock Text="实时监控" Style="{StaticResource PageTitleText}" />
+                <TextBlock Text="{x:Bind ViewModel.Monitor.ScopeText, Mode=OneWay}"
+                           Style="{StaticResource CaptionText}" Margin="0,3,0,0" />
+            </StackPanel>
+
+            <!-- 快捷统计：与底部状态栏同源，抬头就能看到，不用低头找 -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                <Border Background="{StaticResource PanelBackgroundBrush}"
+                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="{StaticResource ControlCornerRadius}" Padding="12,5">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <Ellipse Width="7" Height="7" Fill="{StaticResource StatusOnlineBrush}"
+                                 VerticalAlignment="Center" />
+                        <TextBlock Text="在线" FontSize="11" VerticalAlignment="Center"
+                                   Foreground="{StaticResource TextSecondaryBrush}" />
+                        <TextBlock Text="{x:Bind ViewModel.Stats.OnlineText, Mode=OneWay}" FontSize="13"
+                                   FontWeight="SemiBold" VerticalAlignment="Center"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource StatusOnlineBrush}" />
+                    </StackPanel>
+                </Border>
+                <Border Background="{StaticResource PanelBackgroundBrush}"
+                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="{StaticResource ControlCornerRadius}" Padding="12,5">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <Ellipse Width="7" Height="7" Fill="{StaticResource AlarmBrush}"
+                                 VerticalAlignment="Center" />
+                        <TextBlock Text="未处理报警" FontSize="11" VerticalAlignment="Center"
+                                   Foreground="{StaticResource TextSecondaryBrush}" />
+                        <TextBlock Text="{x:Bind ViewModel.Stats.AlarmUnhandledText, Mode=OneWay}" FontSize="13"
+                                   FontWeight="SemiBold" VerticalAlignment="Center"
+                                   FontFamily="{StaticResource NumberFontFamily}"
+                                   Foreground="{StaticResource AlarmBrush}" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Grid>
+
+        <!-- ============================ 主体 ============================ -->
+        <Grid Grid.Row="1" Margin="8,0,8,8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="1.1*" MinHeight="220" />
+                <RowDefinition Height="6" />
+                <RowDefinition Height="1*" MinHeight="180" />
+            </Grid.RowDefinitions>
+
+            <controls:MapHost x:Name="Map" Grid.Row="0"
+                              HintText="{x:Bind ViewModel.Monitor.MapHint, Mode=OneWay}" />
+
+            <!-- 地图 ↔ 数据页签：可拖拽 -->
+            <controls:SplitterBar Grid.Row="1" Orientation="Horizontal" />
+
+            <controls:DataTabsPanel Grid.Row="2" />
+        </Grid>
+    </Grid>
+</Page>

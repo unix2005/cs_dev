@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Vms.Client.Controls.MapHost"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      地图容器（高德地图 JS API 2.0，GCJ-02）。
+
+      设计上刻意做成"可插拔"：
+        · 正常路径  WebView2 承载本地 WebAssets/map.html（页面内加载高德 SDK）；
+        · 降级路径  WebView2 运行时缺失 / 地图 SDK 加载失败时显示占位面板 + 明确原因。
+
+      车辆打点通过 postMessage(JSON) 推给页面里的 JS，不走文件、不走本地 HTTP，
+      增量更新上百个 marker 的开销远低于重新加载页面。
+      打点颜色与表格一致：在线蓝 / 离线灰 / 报警红。
+    -->
+    <Border Style="{StaticResource CardBorder}" Margin="4,8,8,4">
+        <Grid>
+            <WebView2 x:Name="MapView" Visibility="Collapsed" />
+
+            <!-- 降级占位层 -->
+            <Grid x:Name="FallbackLayer" Background="{StaticResource ShellBackgroundBrush}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" MaxWidth="540">
+                    <FontIcon Glyph="&#xE707;" FontSize="40" Foreground="{StaticResource BorderStrongBrush}" />
+                    <TextBlock Text="地图容器" FontSize="15" FontWeight="SemiBold"
+                               HorizontalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}" />
+                    <TextBlock x:Name="FallbackReason" FontSize="12" TextWrapping="Wrap" TextAlignment="Center"
+                               Foreground="{StaticResource TextHintBrush}" />
+                    <!-- 高德 SDK 自己打印的错误（INVALID_USER_SCODE 等）会回传到这里 -->
+                    <TextBlock x:Name="ConsoleLog" FontSize="11" TextWrapping="Wrap" TextAlignment="Center"
+                               MaxWidth="520" Margin="0,6,0,0"
+                               Foreground="{StaticResource AlarmBrush}"
+                               FontFamily="{StaticResource NumberFontFamily}"
+                               Visibility="Collapsed" />
+                </StackPanel>
+            </Grid>
+
+            <!-- 缩放控件：白底圆角，叠在地图左上角 -->
+            <StackPanel HorizontalAlignment="Left" VerticalAlignment="Top" Margin="12" Spacing="4">
+                <Button Style="{StaticResource PanelIconButton}" Content="&#xE710;"
+                        Click="ZoomIn_Click" ToolTipService.ToolTip="放大" />
+                <Button Style="{StaticResource PanelIconButton}" Content="&#xE70D;"
+                        Click="ZoomOut_Click" ToolTipService.ToolTip="缩小" />
+                <Button Style="{StaticResource PanelIconButton}" Content="&#xE1D3;"
+                        Click="Locate_Click" ToolTipService.ToolTip="回到默认视野" />
+            </StackPanel>
+
+            <!-- 顶部提示条：实时推送 / 过滤状态 -->
+            <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,12,0,0"
+                    Background="#E6FFFFFF" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="{StaticResource ControlCornerRadius}" Padding="10,4">
+                <TextBlock Text="{x:Bind HintText, Mode=OneWay}" FontSize="11"
+                           Foreground="{StaticResource TextSecondaryBrush}" />
+            </Border>
+
+            <!-- 左下：鼠标经纬度读数 -->
+            <Border HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="12,0,0,10"
+                    Background="#E6FFFFFF" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="{StaticResource ControlCornerRadius}" Padding="8,3">
+                <TextBlock Text="{x:Bind PointerText, Mode=OneWay}" FontSize="11"
+                           FontFamily="{StaticResource NumberFontFamily}"
+                           Foreground="{StaticResource TextSecondaryBrush}" />
+            </Border>
+
+            <!-- 右下：打点图例（与表格/树上的状态色一一对应） -->
+            <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,12,10"
+                    Background="#E6FFFFFF" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="{StaticResource ControlCornerRadius}" Padding="8,4">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <StackPanel Orientation="Horizontal" Spacing="5">
+                        <Ellipse Width="8" Height="8" Fill="{StaticResource StatusOnlineBrush}" />
+                        <TextBlock Text="在线" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="5">
+                        <Ellipse Width="8" Height="8" Fill="{StaticResource StatusOfflineBrush}" />
+                        <TextBlock Text="离线" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="5">
+                        <Ellipse Width="8" Height="8" Fill="{StaticResource AlarmBrush}" />
+                        <TextBlock Text="报警" FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Border>
+</UserControl>

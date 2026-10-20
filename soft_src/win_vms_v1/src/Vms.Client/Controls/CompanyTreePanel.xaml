@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Vms.Client.Controls.CompanyTreePanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:Vms.Client.Models"
+    xmlns:controls="using:Vms.Client.Controls">
+
+    <!--
+      ⚠ 资源字典必须写在内容**之前**，且顺序不能反：
+         DataTemplate(公司内容) → DataTemplate(车辆内容) → 选择器 → DataTemplate(节点容器)。
+
+      原因是 StaticResource **不支持前向引用**：XAML 解析到某个元素时，
+      它引用的资源必须已经在该 ResourceDictionary 里注册好。
+      选择器要引用上面两个内容模板，节点模板又要引用选择器，所以顺序是死的。
+      违反的话抛 XamlParseException → 「实时监控」整页加载失败。
+    -->
+    <UserControl.Resources>
+        <!-- 组织节点**内容**（不含容器）：三态复选框 + 名称 + (在线/总数) + 懒加载进度环 -->
+        <DataTemplate x:Key="CompanyContentTemplate" x:DataType="models:CompanyNode">
+            <Grid Height="30">
+                <Grid.ColumnDefinitions>
+                    <!-- 列最小宽 28：框体 + 右边距（与车辆行同一套间距逻辑） -->
+                    <ColumnDefinition Width="Auto" MinWidth="28" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- ⚠ 必须显式 MinWidth=0：CheckBox 默认 MinWidth=120，
+                     不压成 0 会把整行内容顶到很右边（"树没靠左"的真凶之一）。
+                     ⚠ IsThreeState 必须为 True（三态）：组织节点是经典三态复选——
+                     勾选=本级及全部下级选中；取消某一下级=该级及车辆取消、父级变"部分选择"(null)。
+                     null 在控件上渲染成"半选框"，正是父组织部分选择的可视化。
+                     ⚠⚠ **不要设 Width**：WinUI 3 的 CheckBox 模板用 AnimatedIcon 画框，
+                     Width 小于框体宽度会把框右侧切掉、勾画不全（实机反馈）。
+                     只压 MinWidth、去掉 Width 让模板自适应；框体大小用 FontSize 调。
+                     Margin 右边距 8：与车辆行一致。
+                     勾选=选中该组织及其全部下级的车辆（联动定位数据栏）。 -->
+                <CheckBox Grid.Column="0" MinWidth="0" Padding="0" IsThreeState="True"
+                          Margin="0,0,8,0"
+                          FontSize="12.5"
+                          HorizontalAlignment="Left"
+                          IsChecked="{x:Bind IsChecked, Mode=TwoWay}"
+                          Click="OrgCheck_Click"
+                          VerticalAlignment="Center" />
+
+                <TextBlock Grid.Column="1" Text="{x:Bind Name}" FontSize="13"
+                           Margin="4,0,0,0" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{StaticResource TextPrimaryBrush}" />
+
+                <TextBlock Grid.Column="2" Text="{x:Bind CountText}" FontSize="11" Margin="6,0,0,0"
+                           VerticalAlignment="Center" Foreground="{StaticResource AccentStrongBrush}"
+                           FontFamily="{StaticResource NumberFontFamily}" />
+
+                <ProgressRing Grid.Column="3" Width="14" Height="14" Margin="4,0,0,0"
+                              IsActive="{x:Bind IsLoadingVehicles, Mode=OneWay}"
+                              Visibility="{x:Bind IsLoadingVehicles, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                              Foreground="{StaticResource AccentBrush}" />
+            </Grid>
+        </DataTemplate>
+
+        <!-- 车辆节点**内容**：复选框(单选/多选) + 车牌 + 次要信息 -->
+        <DataTemplate x:Key="VehicleContentTemplate" x:DataType="models:VehicleNode">
+            <Grid Height="28">
+                <Grid.ColumnDefinitions>
+                    <!-- ⚠ 列最小宽 28：给复选框留出"框体 + 右边距"。
+                         ⚠ 这里**故意不设**固定宽度给 CheckBox —— 见下面 CheckBox 的注释：
+                         设小 Width 会把模板里的勾选框切掉右侧（框画不全）。
+                         列是 Width="Auto"，会按内容自适应；MinWidth 只是下限兜底。 -->
+                    <ColumnDefinition Width="Auto" MinWidth="28" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- 复选框：在树上勾选车辆（单选=勾一台，多选=勾多台）。
+                     与组织节点的复选互不干扰：组织复选=选中其全部车辆（整棵子树），
+                     车辆复选=把该车加进"定位数据栏联动"的选中集合。
+                     ⚠⚠ **绝对不要给 CheckBox 设 Width**（16/20 都试过）：
+                     WinUI 3 的 CheckBox 模板用 AnimatedIcon 画勾选框，它有**内在尺寸**，
+                     把控件 Width 压到小于框体宽度就会**把框的右侧切掉**、勾画不全（用户实机反馈）。
+                     正确做法 = 只压 MinWidth（去掉默认 120）、去掉 Width 让模板自适应，
+                     框体大小改由 FontSize/GlyphSize 决定；间距只用 Margin 控制。
+                     Margin 右边距 8：Padding="0" 后框体贴着文字，留出呼吸空间（与组织行一致）。 -->
+                <CheckBox Grid.Column="0" MinWidth="0" Padding="0"
+                          Margin="0,0,8,0"
+                          FontSize="12.5"
+                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                          IsChecked="{x:Bind IsChecked, Mode=TwoWay}"
+                          Checked="VehicleCheck_Changed" Unchecked="VehicleCheck_Changed" />
+
+                <!-- 需求：车牌号前面不要加任何图标/圆点，只保留车牌文字。
+                     状态（在线蓝/离线灰/报警红）仍由文字颜色承载 —— VehicleStateBrush
+                     转换器还挂在 Foreground 上，去掉圆点不等于丢掉状态信息。
+                     去掉了原先包着二者的 StackPanel：只剩一个 TextBlock 时它纯属多余嵌套。 -->
+                <TextBlock Grid.Column="1" Text="{x:Bind Name}" FontSize="12.5"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                           Foreground="{x:Bind State, Mode=OneWay, Converter={StaticResource VehicleStateBrush}}" />
+
+                <TextBlock Grid.Column="2" Text="{x:Bind DetailText}" FontSize="11" Margin="6,0,0,0"
+                           VerticalAlignment="Center" Foreground="{StaticResource TextHintBrush}"
+                           TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </DataTemplate>
+
+        <controls:OrgNodeTemplateSelector x:Key="OrgNodeSelector"
+                                          CompanyTemplate="{StaticResource CompanyContentTemplate}"
+                                          VehicleTemplate="{StaticResource VehicleContentTemplate}" />
+
+        <!--
+          节点容器模板：**根必须是 TreeViewItem** —— 这是 WinUI TreeView 数据绑定模式的硬性要求，
+          TreeView 会把模板里的 TreeViewItem 认作该数据项的容器，并用它的 ItemsSource 递归展开子树。
+          （此前把 TreeViewItem 直接当 ItemTemplate，同时用 TreeView.ItemTemplateSelector 分流
+            公司/车辆两个模板 —— 选择器与"模板根=TreeViewItem"这条约定不兼容：
+            容器没拿到数据，整棵树只剩根节点一行、连展开箭头都不画。现在改成
+            "容器模板唯一 + 行内容用 ContentTemplateSelector 分流"，两条约定各自独立、互不干扰。）
+
+          行内容用 ContentControl + ContentTemplateSelector 分派，而不是给 TreeView 换模板选择器：
+          TreeViewItem 的 Content 可以是任意对象，选择器只管"内容长什么样"。
+        -->
+        <DataTemplate x:Key="OrgNodeTemplate" x:DataType="models:OrgNodeBase">
+            <TreeViewItem ItemsSource="{x:Bind Children}"
+                          IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                          HasUnrealizedChildren="{x:Bind ShowExpandArrow, Mode=OneWay}"
+                          HorizontalContentAlignment="Stretch">
+                <ContentControl HorizontalContentAlignment="Stretch"
+                                Content="{x:Bind}"
+                                ContentTemplateSelector="{StaticResource OrgNodeSelector}" />
+            </TreeViewItem>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <!--
+      左侧「组织/车辆」树，内嵌在「实时监控」导航项的展开区里（见 NavRail.xaml）。
+
+      树里同时挂两类节点，行内容由 OrgNodeSelector 按节点类型分派：
+        · 组织节点   —— 三态复选框 + 名称 + (在线/总数) 徽标；可展开出下级组织 / 车辆；
+        · 车辆节点   —— 状态点（在线蓝 / 离线灰 / 报警红）+ 车牌号 + 次要信息；
+                       单击即"选中该车"，联动地图与右侧数据页签。
+
+      版面要点（用户两次提过）：**不要再套白色卡片** —— 卡片自带外缩进 + 圆角 + 边框，
+      根节点看着就被推进了半个侧栏。现在整块紧贴侧栏左缘，只保留一行底部摘要，
+      视觉上就是「实时监控」导航项的自然延伸。
+
+      车辆是懒加载的：展开某个组织才去拉它的前 200 台车，避免一上来就为 3 万节点建 UI。
+    -->
+    <Grid Margin="0,0,0,6">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!--
+          「全部车辆」= 回到全局视图（清空组织过滤 + 检索框）。
+          没有这一行的话，点了某个分公司就再也回不到"全部"了 —— 只能靠再输一次无关关键词绕开，
+          对值班用户是个死胡同。
+        -->
+        <Button x:Name="AllVehiclesButton" Grid.Row="0" Click="AllVehicles_Click"
+                HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                Background="Transparent" BorderThickness="0" Padding="18,0,8,0" Height="30"
+                ToolTipService.ToolTip="清空组织过滤与检索，回到全部车辆">
+            <StackPanel Orientation="Horizontal" Spacing="7">
+                <FontIcon Glyph="&#xE7F4;" FontSize="14" VerticalAlignment="Center"
+                          Foreground="{StaticResource TextSecondaryBrush}" />
+                <TextBlock Text="全部车辆" FontSize="13" VerticalAlignment="Center"
+                           Foreground="{StaticResource TextSecondaryBrush}" />
+            </StackPanel>
+        </Button>
+
+        <TreeView x:Name="Tree" Grid.Row="1"
+                  SelectionMode="Single"
+                  ItemInvoked="Tree_ItemInvoked"
+                  Expanding="Tree_Expanding"
+                  Collapsed="Tree_Collapsed"
+                  ItemsSource="{x:Bind ViewModel.Monitor.Companies}"
+                  ItemTemplate="{StaticResource OrgNodeTemplate}"
+                  Padding="0" Margin="0" />
+
+        <!-- 底部摘要：已勾选组织（批量下发/导出范围）+ 树上已加载车辆数 + 车辆勾选联动提示 -->
+        <StackPanel Grid.Row="2" Margin="18,6,10,0" Spacing="3">
+            <Grid>
+                <TextBlock Text="{x:Bind ViewModel.Monitor.CheckedSummary, Mode=OneWay}"
+                           Style="{StaticResource CaptionText}" VerticalAlignment="Center" />
+                <TextBlock Text="{x:Bind ViewModel.Monitor.TreeSummary, Mode=OneWay}"
+                           FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"
+                           Foreground="{StaticResource TextHintBrush}"
+                           FontFamily="{StaticResource NumberFontFamily}" />
+            </Grid>
+            <TextBlock Text="{x:Bind ViewModel.Monitor.SelectionSummary, Mode=OneWay}"
+                       FontSize="11" VerticalAlignment="Center"
+                       Foreground="{StaticResource AccentStrongBrush}" />
+        </StackPanel>
+    </Grid>
+</UserControl>

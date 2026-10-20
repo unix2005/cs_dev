@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Vms.Client</RootNamespace>
+    <AssemblyName>Vms.Client</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 应用图标：来自 icon/3/app.ico（已含 16/32/48/256 多分辨率）。
+         同时让它在构建产物里可见，便于任务栏/资源管理器直接显示。 -->
+    <ApplicationIcon>..\..\icon\3\app.ico</ApplicationIcon>
+    <!-- 同时声明 x64 与 arm64ec：避免 VS 选中 arm64ec 时直接报"平台不支持"；
+         实际用哪个由下方条件块决定，二者都能正确构建。 -->
+    <Platforms>x64;arm64ec</Platforms>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableMsixTooling>false</EnableMsixTooling>
+  </PropertyGroup>
+
+  <!-- 平台相关：运行时标识(RID) + 自包含策略。
+       arm64ec 受 Windows App SDK 硬性限制：必须自包含(WindowsAppSdkSelfContained=true)。
+       x64（以及未显式指定平台时的默认构建）用本机已装的运行时，保持轻量。 -->
+  <PropertyGroup Condition="'$(Platform)'=='arm64ec'">
+    <RuntimeIdentifier>win-arm64ec</RuntimeIdentifier>
+    <WindowsAppSdkSelfContained>true</WindowsAppSdkSelfContained>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Platform)'!='arm64ec'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <WindowsAppSdkSelfContained>false</WindowsAppSdkSelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+  </ItemGroup>
+
+  <!-- 地图页面等静态资源：必须随程序输出，WebView2 通过虚拟主机名映射读取 -->
+  <ItemGroup>
+    <Content Include="WebAssets\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    native 核心库：把 native/build 下的产物拷到 exe 同目录。
+    用 NativeLibraryResolver 显式全路径加载，不走系统 DLL 搜索顺序（防 DLL 劫持）。
+    若你的库来自别处，改这里的路径，或设环境变量 VMS_NATIVE_DIR 指向目录即可。
+  -->
+  <ItemGroup>
+    <None Include="..\..\native\build\vms_core.dll" Condition="Exists('..\..\native\build\vms_core.dll')">
+      <Link>vms_core.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\..\native\build\vms_core.pdb" Condition="Exists('..\..\native\build\vms_core.pdb')">
+      <Link>vms_core.pdb</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

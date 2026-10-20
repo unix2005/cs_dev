@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Vms.Client.Controls.AppHeader"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      顶部两段（Gallery 式）：
+        Row0  标题栏：浅色底 + 应用图标 + 标题，整条是窗口拖拽区（右侧留 150px 给系统按钮）
+        Row1  命令条：白底 + 扁平图标按钮 + 检索框
+
+      为什么检索框放在命令条而不是标题栏里：
+        标题栏那一整块被 SetTitleBar 声明成了窗口拖拽区（非客户区），
+        把可交互控件塞进去在部分 Windows 版本上会被当成拖拽而拿不到焦点。
+        放进命令条就没有这个不确定性，视觉上也依然是"顶部一条"。
+    -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ============================ 标题栏 ============================ -->
+        <Border x:Name="TitleBarDragRegion" Grid.Row="0"
+                Height="{StaticResource TitleBarHeight}"
+                Background="{StaticResource TitleBarBrush}"
+                BorderBrush="{StaticResource DividerBrush}"
+                BorderThickness="0,0,0,1">
+            <!-- Border 只能有一个子元素，所以 logo 与"系统按钮留位"必须放进同一个 Grid -->
+            <Grid>
+                <StackPanel Orientation="Horizontal" Spacing="10" Margin="14,0,0,0" VerticalAlignment="Center">
+                    <!-- LOGO：换成贵司 .ico/png 只需替换这个 Border 的内容 -->
+                    <Border Width="26" Height="26" CornerRadius="{StaticResource ControlCornerRadius}"
+                            Background="{StaticResource AccentBrush}">
+                        <FontIcon Glyph="&#xE804;" FontSize="14" Foreground="White" />
+                    </Border>
+                    <TextBlock Text="车辆管理系统" FontSize="14" FontWeight="SemiBold"
+                               VerticalAlignment="Center" Foreground="{StaticResource TextPrimaryBrush}" />
+                    <Border Width="1" Height="14" Background="{StaticResource BorderStrongBrush}" Margin="4,0" />
+                    <TextBlock Text="Vehicle Monitoring &amp; Management" FontSize="11"
+                               VerticalAlignment="Center" Foreground="{StaticResource TextHintBrush}" />
+                </StackPanel>
+
+                <!-- 给系统的最小化/最大化/关闭留位，避免高 DPI 下被压住 -->
+                <Border HorizontalAlignment="Right" Width="150" />
+            </Grid>
+        </Border>
+
+        <!-- ============================ 命令条 ============================ -->
+        <Border Grid.Row="1"
+                Height="{StaticResource ToolBarHeight}"
+                Background="{StaticResource ToolBarBrush}"
+                BorderBrush="{StaticResource DividerBrush}"
+                BorderThickness="0,0,0,1">
+            <Grid Margin="10,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE707;" Tag="地图视图"
+                            Click="Action_Click" ToolTipService.ToolTip="地图" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE1D3;" Tag="定位服务"
+                            Click="Action_Click" ToolTipService.ToolTip="定位服务" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE804;" Tag="车辆信息"
+                            Click="Action_Click" ToolTipService.ToolTip="车辆信息" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE81C;" Tag="轨迹回放"
+                            Click="Action_Click" ToolTipService.ToolTip="轨迹回放" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE7BA;" Tag="报警管理"
+                            Click="Action_Click" ToolTipService.ToolTip="报警管理" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE722;" Tag="抓拍图片"
+                            Click="Action_Click" ToolTipService.ToolTip="抓拍图片" />
+                    <Border Width="1" Height="18" Background="{StaticResource BorderStrongBrush}" Margin="8,0" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE713;" Tag="系统设置"
+                            Click="Action_Click" ToolTipService.ToolTip="系统设置" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE946;" Tag="关于"
+                            Click="Action_Click" ToolTipService.ToolTip="关于" />
+                </StackPanel>
+
+                <!-- 检索：直接过滤组织树下的车辆与数据页签 -->
+                <AutoSuggestBox x:Name="SearchBox" Grid.Column="1"
+                                Width="280" Height="32" Margin="16,0"
+                                HorizontalAlignment="Right" VerticalAlignment="Center"
+                                FontSize="12"
+                                PlaceholderText="检索车牌号 / 自编号，回车生效"
+                                QuerySubmitted="SearchBox_QuerySubmitted">
+                    <!-- QueryIcon 的类型是 IconElement（不是 IconSource，编译器已验证过）。
+                         写 QueryIcon="Find" 这种字符串简写要靠转换器，行为不稳，
+                         显式给 SymbolIcon 最确定。 -->
+                    <AutoSuggestBox.QueryIcon>
+                        <SymbolIcon Symbol="Find" />
+                    </AutoSuggestBox.QueryIcon>
+                </AutoSuggestBox>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                    <Border Width="1" Height="18" Background="{StaticResource BorderStrongBrush}" Margin="8,0" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE77B;" Tag="在线用户"
+                            Click="Action_Click" ToolTipService.ToolTip="在线用户" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE767;" Tag="语音播报"
+                            Click="Action_Click" ToolTipService.ToolTip="语音播报" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE896;" Tag="数据导出"
+                            Click="Action_Click" ToolTipService.ToolTip="数据导出" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xEA37;" Tag="列表配置"
+                            Click="Action_Click" ToolTipService.ToolTip="列表配置" />
+                    <Button Style="{StaticResource ToolBarIconButton}" Content="&#xE740;" Tag="全屏切换"
+                            Click="Action_Click" ToolTipService.ToolTip="全屏" />
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>
