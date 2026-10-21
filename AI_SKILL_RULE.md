@@ -34,7 +34,7 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
     - **knockd/**：SPA 单包授权进程（UDP 包校验 + nftables 动态放行，libnftables 直连、IPv4/IPv6 双栈监听），代码量严格控制在 **500 行以内**，仅授予 `CAP_NET_ADMIN`
     - **netd/**：协议进程（SM2 密钥协商、SM4\-GCM 解包、字段校验、限流），公网暴露，**非 root + chroot + seccomp，无 DB 凭据、无文件写权限**
     - **bizd/**：可信路由转发进程（netd 已解密 TLV → JSON over TCP 转发下游微服务，DB / 业务逻辑 / 审计在下游），不持有 DB 凭据，**仅监听 Unix Socket，不直接暴露公网**
-    - **lib\_src/l\_4/q\_clientcomm/**：跨三端共享的纯C客户端通信内核库（封装 q\_chan/q\_net/q\_codec/q\_crypto，对外暴露 C ABI 门面，UI 绝不碰 q\_fd\_t/q\_chan\_t）；产物 libqclientcomm.a / Windows qcomm.lib+dll；**win\_client/**（WinUI3）、**gtk\_vms\_*/**（GTK4）、**macos\_vms\_*/**（原生）为各端 UI 外壳，UI 操作只允许主线程
+    - **lib\_src/l\_4/q\_clientcomm/**：跨三端共享的纯C客户端通信内核库（封装 q\_chan/q\_net/q\_codec/q\_crypto，对外暴露 C ABI 门面，UI 绝不碰 q\_fd\_t/q\_chan\_t）；产物 libqclientcomm.a / Windows qcomm.lib+dll；**win\_vms\_v1/**（Windows 端 WinUI3）、**gtk\_vms\_*/**（Linux 端 GTK4）、**macos\_vms\_*/**（macOS 端原生）为各端 UI 外壳，UI 操作只允许主线程
 
 ## 二、AI 目录操作强制约束
 
@@ -155,7 +155,7 @@ cs\_dev 为项目根开发目录，固定子目录用途如下，AI 所有开发
 
 ```mermaid
 graph TD
-    APP["soft_src 业务层<br/>knockd / netd / bizd / 各端外壳（win_client / gtk_* / macos_*）"]
+    APP["soft_src 业务层<br/>knockd / netd / bizd / 各端外壳（win_vms_v1 / gtk_vms_* / macos_vms_*）"]
     L3["l_3 协议层<br/>q_chan / q_spa"]
     L2["l_2 能力层<br/>q_net / q_ipc / q_codec / q_sec"]
     L1["l_1 基础层<br/>q_log / q_mem / q_ds / q_util / q_rand / q_crypto / q_reactor / q_xcfg"]

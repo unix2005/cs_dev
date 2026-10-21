@@ -15,7 +15,8 @@
 # 二、多节点整体部署拓扑
 
 ```text
-Qt 客户端
+运维客户端（Windows: WinUI 3 / Linux: GTK4 / macOS: 原生 AppKit·SwiftUI）
+   │           三端共享同一份纯 C 通信内核（l_4/q_clientcomm，C ABI 门面）
    │
    ├── ① UDP SPA 敲门包（向全部计算节点公网 IP 并行发送）
    ▼

@@ -20,6 +20,7 @@ cmake_install.cmake
 *.a
 *.so
 *.dylib
+*.dll
 
 # 编辑器 / 系统
 .DS_Store
@@ -28,6 +29,7 @@ cmake_install.cmake
 .idea/
 .vscode/
 bin/
+.workbuddy/
 
 # 本机临时文件
 *.log
@@ -47,6 +49,7 @@ minimal_svc_shared
 # 开源软件
 open_src/
 tongsuo/
+tongsuo-linux/
 cJSON/
 soft_src/macos_vms_v1/macos_vms_v1
 bin/q_service_knockd

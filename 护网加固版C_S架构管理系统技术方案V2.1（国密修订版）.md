@@ -108,7 +108,7 @@ soft_src/
   knockd/     SPA 授权进程
   netd/       协议进程（8 文件：srv_netd.h+main+config/util/limit/ipc/handler/srv）
   bizd/       路由转发进程（7 文件：srv_bizd.h+main+config/util/route/handler/srv）
-  win_client/   Windows 端 WinUI3 外壳（C#/C++ WinRT，P/Invoke 或直链 qcomm）
+  win_vms_v1/   Windows 端 WinUI3 外壳（C#/C++ WinRT，P/Invoke 或直链 qcomm；native/ 为 C ABI 内核）
   gtk_vms_v1/ gtk_vms_v2/ gtk_tms_v1/   Linux 端 GTK4 外壳
   macos_vms_v1/ q_s_vmsv1__login/       macOS 端原生外壳（Swift/AppKit）
 open_src/     Tongsuo、FFmpeg、OLLVM（仅编译依赖，不修改核心算法）
@@ -145,7 +145,8 @@ bin|lib|dll/  产物（严格平台分离）
 
 **平台可用性实测**：`q_reactor` 按平台选择后端（Linux=epoll、macOS/BSD=kqueue、
 Windows=WSAPoll），故在 macOS 开发机上 `q_reactor_create()` 可正常返回
-（与早期 knockd 注释中"仅 epoll"的描述已不一致，以当前代码为准）。
+（早期 knockd 注释曾写"仅 epoll、非 Linux 不可用"，现按本结论修正：**库层跨平台，
+ 但 knockd / netd / bizd 作为后台守护进程，生产只部署于 Linux**，二者不矛盾）。
 `netd` / `bizd` 均已在 macOS 完成启动与监听冒烟；生产仍按 Linux 部署。
 
 ### 2.2 epoll reactor（服务端）
