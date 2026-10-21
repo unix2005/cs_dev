@@ -1,16 +1,19 @@
 /* =============================================================================
- * vms_core.c — vms_api.h 的参考实现（Mock / 联调替身）
+ * vms_core.c — vms_api.h 的参考实现
  * -----------------------------------------------------------------------------
- * 作用：
- *   1. 让 C# + WinUI3 客户端在**没有真实后端**的情况下也能端到端跑起来；
- *   2. 把 ABI 契约用代码固化下来 —— 你要接自己的库时，照这个 .h 实现即可，
- *      C# 侧一行不用改。
+ * 两套数据源并存（按是否登录自动切换）：
+ *   1. **未登录**：内置 Mock 数据 —— 让 C# + WinUI3 客户端在**没有真实后端**时
+ *      也能端到端跑起来（压 UI、调布局、演示）。
+ *   2. **已登录**（vms_login 成功）：会话由 l_4 的 qc_* 门面承载，
+ *      数据面在 M2/M3 逐步替换为真实业务请求；M1 先打通登录闭环。
  *
- * 编译（llvm-mingw / MinGW-w64，x64）：
- *   gcc -shared -O2 -DVMS_BUILD_DLL -Iinclude -o build/vms_core.dll src/vms_core.c \
- *       -Wl,--out-implib,build/libvms_core.a -static-libgcc
- * MSVC：
- *   cl /LD /O2 /DVMS_BUILD_DLL /Iinclude src\vms_core.c /Fe:build\vms_core.dll
+ * 会话链路（M1）：
+ *   C# -> vms_login -> libqclientcomm(qc_*) -> q_chan/q_net/q_codec/q_crypto
+ *       -> [UDP SPA 敲门] -> netd:18099 -> UDS bizd -> 登录微服务 9002
+ *   UI 层绝不直接 P/Invoke 底层 q_* 库（帧封装与 seq 窗口由库管理，手拼必错）。
+ *
+ * 编译（llvm-mingw / MinGW-w64，x64）：见 shell/build_vmscore_win.sh
+ *   （需链接 libqclientcomm 及闭包 + Tongsuo libcrypto）
  *
  * 数据规模刻意与真实系统对齐：34554 台车、18714 台归属运输公司，用于压 UI。
  * ===========================================================================*/
@@ -20,6 +23,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#include "qc_client.h"        /* l_4 跨三端共享的客户端通信门面（qc_*） */
+#include "include_ipc_proto.h" /* Q_PBKDF2_ITER_DEFAULT / Q_IPC_R_* 结果码 / 业务参数 tag */
+#include "q_codec.h"          /* q_codec_tlv_decode：解析业务响应 TLV */
+#include "cJSON.h"            /* 下游 JSON 解析（**不走** include_xml.h：后者依赖 libxml2） */
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -69,12 +77,27 @@ struct vms_context {
     vms_log_cb   log_cb;
     void*        log_user;
 
+    /* —— M1：真实会话（qc_* 门面）—— 未登录时 sess==NULL，数据面走 mock —— */
+    qc_session_t* sess;
+    int32_t       logged_in;
+    uint8_t       token[32];      /* 会话 Token（业务请求随带；本进程内留存，不外泄） */
+    char          host[VMS_HOST_MAX];  /* 重连用：不保存口令，只保存地址与账号 */
+    uint16_t      port;
+    char          user[VMS_USER_MAX];
+    char          pubkey_path[VMS_PATH_MAX];
+    char          knock[VMS_HOST_MAX];
+    char          spa_key_path[VMS_PATH_MAX];
+    uint32_t      pbkdf2_iter;
+
 #ifdef _WIN32
     CRITICAL_SECTION lock;
     HANDLE           push_thread;
     volatile LONG    push_stop;
 #endif
 };
+
+/* M1：真实会话释放（定义在下方「M1：真实登录闭环」段，此处提前声明供 destroy/disconnect 使用） */
+static void vms_session_close(struct vms_context* ctx);
 
 /* --------------------------------- 工具 ----------------------------------- */
 static uint64_t xorshift64(uint64_t* s)
@@ -296,6 +319,7 @@ size_t VMS_CALL vms_struct_size(int32_t kind)
     case VMS_STRUCT_COMPANY:  return sizeof(vms_company);
     case VMS_STRUCT_VEHICLE:  return sizeof(vms_vehicle);
     case VMS_STRUCT_QUERY:    return sizeof(vms_query);
+    case VMS_STRUCT_CREDENTIALS: return sizeof(vms_credentials);
     default:                  return 0;
     }
 }
@@ -370,6 +394,7 @@ void VMS_CALL vms_destroy(vms_context* ctx)
     vms_unsubscribe(ctx);
     DeleteCriticalSection(&ctx->lock);
 #endif
+    vms_session_close(ctx);          /* M1：真实会话（含 Token 清零） */
     free(ctx->vehicles);
     free(ctx->vehicle_company);
     free(ctx);
@@ -388,6 +413,7 @@ int32_t VMS_CALL vms_disconnect(vms_context* ctx)
 {
     if (!ctx) return VMS_ERR_INVALID_ARG;
     vms_unsubscribe(ctx);
+    vms_session_close(ctx);          /* M1：断开即释放会话与 Token */
     ctx->connected = 0;
     return VMS_OK;
 }
@@ -397,9 +423,393 @@ int32_t VMS_CALL vms_is_connected(const vms_context* ctx)
     return (ctx && ctx->connected) ? 1 : 0;
 }
 
-int32_t VMS_CALL vms_get_stats(const vms_context* ctx, vms_stats* out_stats)
+/* ======================= M1：真实登录闭环（qc_* 门面） ======================= */
+
+static uint8_t* vms_read_file(const char* path, size_t* out_len)
+{
+    FILE*    f;
+    uint8_t* buf;
+    long     sz;
+
+    if (!path || !out_len) return NULL;
+    *out_len = 0;
+    f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) { fclose(f); return NULL; }
+    rewind(f);
+    buf = (uint8_t*)malloc((size_t)sz + 1u);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return NULL; }
+    fclose(f);
+    *out_len = (size_t)sz;
+    return buf;
+}
+
+static int vms_hexval(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* hex -> 字节；返回字节数，失败 -1 */
+static int vms_from_hex(const char* hex, uint8_t* out, size_t cap)
+{
+    size_t i, n;
+    if (!hex || !out) return -1;
+    n = strlen(hex) / 2u;
+    if (n == 0u || n > cap || (strlen(hex) % 2u) != 0u) return -1;
+    for (i = 0u; i < n; i++)
+    {
+        int hi = vms_hexval(hex[2u * i]);
+        int lo = vms_hexval(hex[2u * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return (int)n;
+}
+
+/* "ip:port" -> host + port */
+static int vms_split_ep(const char* s, char* host, size_t cap, int* port)
+{
+    const char* p;
+    if (!s || !host || !port || !(p = strrchr(s, ':')) || p == s) return -1;
+    if ((size_t)(p - s) >= cap) return -1;
+    memcpy(host, s, (size_t)(p - s));
+    host[p - s] = '\0';
+    *port = atoi(p + 1);
+    return (*port > 0) ? 0 : -1;
+}
+
+/* 关闭并释放真实会话（幂等）；Token 立即清零 */
+static void vms_session_close(struct vms_context* ctx)
+{
+    if (!ctx) return;
+    if (ctx->sess) { qc_session_destroy(ctx->sess); ctx->sess = NULL; }
+    ctx->logged_in = 0;
+    memset(ctx->token, 0, sizeof(ctx->token));
+}
+
+int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred)
+{
+    uint8_t* pub = NULL;
+    size_t   pub_len = 0u;
+    uint8_t  devid[32];
+    size_t   devid_len = 0u;
+    uint8_t  salt[64];
+    size_t   salt_len = 0u;
+    uint8_t  pwd_hash[32];
+    uint32_t iter;
+    int      rc;
+
+    if (!ctx || !cred) return VMS_ERR_INVALID_ARG;
+    if (!cred->host[0] || cred->port == 0 || !cred->user[0] || !cred->pubkey_path[0])
+    {
+        set_error("凭据不完整：host/port/user/pubkey_path 必填", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+
+    /* 已登录则先关闭旧会话（一连接 = 一会话，不复用） */
+    vms_session_close(ctx);
+
+    /* 设备指纹：缺省用内置固定值（真实部署应取硬件指纹并妥善保管） */
+    if (cred->devid_hex[0])
+    {
+        int n = vms_from_hex(cred->devid_hex, devid, sizeof(devid));
+        if (n <= 0) { set_error("devid_hex 非法", VMS_ERR_INVALID_ARG); return VMS_ERR_INVALID_ARG; }
+        devid_len = (size_t)n;
+    }
+    else
+    {
+        memcpy(devid, "QV_WIN_0001", 11);
+        devid_len = 11u;
+    }
+    iter = cred->pbkdf2_iter ? cred->pbkdf2_iter : Q_PBKDF2_ITER_DEFAULT;
+
+    /* 服务端静态公钥：握手时校验服务端身份，抗中间人 —— 必须内置/随客户端分发 */
+    pub = vms_read_file(cred->pubkey_path, &pub_len);
+    if (!pub || pub_len == 0u)
+    {
+        free(pub);
+        set_error("读取服务端 SM2 公钥失败", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+
+    ctx->sess = qc_session_create(pub, pub_len, 1u, 1u);
+    free(pub);
+    if (!ctx->sess)
+    {
+        set_error("qc_session_create 失败（公钥非法或内存不足）", VMS_ERR_INTERNAL);
+        return VMS_ERR_INTERNAL;
+    }
+
+    /* SPA 敲门（可选）：未部署 knockd 时跳过 */
+    if (cred->knock[0])
+    {
+        char        khost[VMS_HOST_MAX];
+        int         kport = 0;
+        const char* keyp  = cred->spa_key_path[0] ? cred->spa_key_path : NULL;
+        uint8_t     key[32];
+        size_t      keylen = 0u;
+        uint8_t     uid[32];
+        size_t      ulen;
+
+        if (vms_split_ep(cred->knock, khost, sizeof(khost), &kport) != 0 || !keyp)
+        {
+            set_error("knock 参数非法（需 ip:port 且给出 spa_key_path）", VMS_ERR_INVALID_ARG);
+            vms_session_close(ctx);
+            return VMS_ERR_INVALID_ARG;
+        }
+        {
+            uint8_t* kb = vms_read_file(keyp, &keylen);
+            if (!kb || keylen == 0u || keylen > sizeof(key))
+            {
+                free(kb);
+                set_error("SPA 密钥读取失败（需 16 字节）", VMS_ERR_INVALID_ARG);
+                vms_session_close(ctx);
+                return VMS_ERR_INVALID_ARG;
+            }
+            memcpy(key, kb, keylen);
+            memset(kb, 0, keylen);
+            free(kb);
+        }
+        memset(uid, 0, sizeof(uid));
+        ulen = strlen(cred->user);
+        if (ulen > sizeof(uid)) ulen = sizeof(uid);
+        memcpy(uid, cred->user, ulen);
+
+        rc = qc_knock(khost, kport, key, keylen, 0, uid,
+                      cred->port, 300);
+        memset(key, 0, sizeof(key));
+        if (rc != 0)
+        {
+            set_error("SPA 敲门发送失败", VMS_ERR_NOT_CONNECTED);
+            vms_session_close(ctx);
+            return VMS_ERR_NOT_CONNECTED;
+        }
+    }
+
+    rc = qc_connect(ctx->sess, cred->host, (int)cred->port);
+    if (rc != 0)
+    {
+        set_error("TCP 连接或 SM2 握手失败（未敲门 / 端口不通 / 公钥不匹配？）", VMS_ERR_NOT_CONNECTED);
+        vms_session_close(ctx);
+        return VMS_ERR_NOT_CONNECTED;
+    }
+
+    rc = qc_hello(ctx->sess);
+    if (rc != 0)
+    {
+        set_error("HELLO 失败", VMS_ERR_NOT_CONNECTED);
+        vms_session_close(ctx);
+        return (rc > 0) ? rc : VMS_ERR_NOT_CONNECTED;
+    }
+
+    memset(salt, 0, sizeof(salt));
+    rc = qc_fetch_salt(ctx->sess, cred->user, salt, sizeof(salt), &salt_len);
+    if (rc != 0 || salt_len == 0u)
+    {
+        set_error("拉取账号 salt 失败", VMS_ERR_NOT_CONNECTED);
+        vms_session_close(ctx);
+        return (rc > 0) ? rc : VMS_ERR_NOT_CONNECTED;
+    }
+
+    /* 本地派生：口令**不出进程**，外发的只是 32B 派生值 */
+    rc = qc_pbkdf2_sm3((const uint8_t*)cred->password, strlen(cred->password),
+                       salt, salt_len, iter, pwd_hash);
+    if (rc != 0)
+    {
+        set_error("PBKDF2-SM3 派生失败", VMS_ERR_INTERNAL);
+        vms_session_close(ctx);
+        return VMS_ERR_INTERNAL;
+    }
+
+    rc = qc_login(ctx->sess, cred->user, pwd_hash,
+                  cred->otp[0] ? cred->otp : "000000",
+                  devid, devid_len, "vms_core/1.1", ctx->token);
+    memset(pwd_hash, 0, sizeof(pwd_hash));   /* 派生值不滞留 */
+    memset(salt, 0, sizeof(salt));
+    if (rc != 0)
+    {
+        if (rc > 0)
+            snprintf(g_last_error, sizeof(g_last_error), "登录被拒绝：结果码 %d", rc);
+        else
+            set_error("登录失败：连接中断", VMS_ERR_NOT_CONNECTED);
+        vms_session_close(ctx);
+        return (rc > 0) ? rc : VMS_ERR_NOT_CONNECTED;
+    }
+
+    ctx->logged_in = 1;
+    ctx->connected = 1;
+    /* 保存重连所需的最小信息（**不含口令**） */
+    snprintf(ctx->host, sizeof(ctx->host), "%s", cred->host);
+    ctx->port = cred->port;
+    snprintf(ctx->user, sizeof(ctx->user), "%s", cred->user);
+    snprintf(ctx->pubkey_path, sizeof(ctx->pubkey_path), "%s", cred->pubkey_path);
+    snprintf(ctx->knock, sizeof(ctx->knock), "%s", cred->knock);
+    snprintf(ctx->spa_key_path, sizeof(ctx->spa_key_path), "%s", cred->spa_key_path);
+    ctx->pbkdf2_iter = iter;
+    g_last_error[0] = '\0';
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_logout(vms_context* ctx)
+{
+    int rc;
+
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    if (!ctx->sess) { ctx->logged_in = 0; return VMS_OK; }
+
+    rc = qc_logout(ctx->sess);
+    vms_session_close(ctx);
+    ctx->connected = 0;
+    return (rc <= 0) ? VMS_OK : rc;
+}
+
+int32_t VMS_CALL vms_heartbeat(vms_context* ctx)
+{
+    int rc;
+
+    if (!ctx || !ctx->sess) return VMS_ERR_NOT_CONNECTED;
+    rc = qc_heartbeat(ctx->sess);
+    if (rc < 0) return VMS_ERR_NOT_CONNECTED;
+    return rc;   /* 0 = OK；>0 = 服务端结果码 */
+}
+
+/* ==================== M2：真实业务查询（BIZ_QUERY + cJSON） ==================== */
+
+/* 业务响应缓冲上限：TLV(RESULT) + TLV(BODY) 中 BODY 为下游 JSON，8KB 对 stats 足够 */
+#define VMS_BIZ_RESP_MAX  8192u
+
+/* 在明文响应 TLV 里找指定 tag（返回 val 指针与长度；未找到返回 NULL） */
+static const uint8_t* vms_tlv_find(const uint8_t* buf, size_t len, uint16_t tag, uint16_t* out_len)
+{
+    size_t off = 0u;
+
+    while (off < len)
+    {
+        uint16_t t = 0u, vlen = 0u;
+        const uint8_t* val = NULL;
+        size_t used = 0u;
+
+        if (q_codec_tlv_decode(buf + off, len - off, &t, &val, &vlen, &used) != 0)
+            break;
+        off += used;
+        if (t == tag)
+        {
+            if (out_len) *out_len = vlen;
+            return val;
+        }
+    }
+    return NULL;
+}
+
+/* 用下游 JSON 的 data 段刷新 ctx->stats；成功 0，失败 -1（错误信息已 set_error） */
+static int vms_stats_from_json(struct vms_context* ctx, const char* json)
+{
+    cJSON* root = cJSON_Parse(json);
+    cJSON* data;
+    cJSON* it;
+
+    if (!root) { set_error("业务响应 JSON 解析失败", VMS_ERR_INTERNAL); return -1; }
+
+    /* 下游 result：bizd 通用转发只回"转发成功"，真实业务结果在下游 JSON 里 */
+    it = cJSON_GetObjectItem(root, "result");
+    if (it && cJSON_IsNumber(it) && (int)it->valuedouble != 0)
+    {
+        int r = (int)it->valuedouble;
+        const char* msg = "";
+        cJSON* m = cJSON_GetObjectItem(root, "message");
+        if (m && cJSON_IsString(m) && m->valuestring) msg = m->valuestring;
+        snprintf(g_last_error, sizeof(g_last_error), "业务查询被拒绝：结果码 %d %s", r, msg);
+        cJSON_Delete(root);
+        return r > 0 ? r : -1;
+    }
+
+    data = cJSON_GetObjectItem(root, "data");
+    if (!data || !cJSON_IsObject(data))
+    {
+        cJSON_Delete(root);
+        set_error("业务响应缺少 data 段", VMS_ERR_INTERNAL);
+        return -1;
+    }
+
+#define VMS_PICK_NUM(field, dst)                                        \
+    do {                                                                \
+        cJSON* f = cJSON_GetObjectItem(data, (field));                  \
+        if (f && cJSON_IsNumber(f)) (dst) = (uint32_t)f->valuedouble;    \
+    } while (0)
+
+    VMS_PICK_NUM("total",           ctx->stats.total);
+    VMS_PICK_NUM("online",          ctx->stats.online);
+    VMS_PICK_NUM("offline",         ctx->stats.offline);
+    VMS_PICK_NUM("excluded",        ctx->stats.excluded);
+    VMS_PICK_NUM("alarm_unhandled", ctx->stats.alarm_unhandled);
+#undef VMS_PICK_NUM
+
+    it = cJSON_GetObjectItem(data, "online_rate");
+    if (it && cJSON_IsNumber(it))
+        ctx->stats.online_rate = (float)it->valuedouble;
+    else if (ctx->stats.total > 0u)
+        ctx->stats.online_rate = (float)ctx->stats.online * 100.0f / (float)ctx->stats.total;
+
+    cJSON_Delete(root);
+    return 0;
+}
+
+/* 拉一次真实统计；成功 0；>0 服务端结果码；<0 本地错误 */
+static int32_t vms_fetch_stats(struct vms_context* ctx)
+{
+    uint8_t  resp[VMS_BIZ_RESP_MAX];
+    size_t   rlen = 0u;
+    uint16_t blen = 0u;
+    const uint8_t* body;
+    char     json[VMS_BIZ_RESP_MAX];
+    int      rc;
+
+    rc = qc_biz_query(ctx->sess, "stats", NULL, 0u, 0u, resp, sizeof(resp), &rlen);
+    if (rc < 0)
+    {
+        set_error("业务查询失败：连接中断", VMS_ERR_NOT_CONNECTED);
+        return VMS_ERR_NOT_CONNECTED;
+    }
+    if (rc > 0)
+    {
+        snprintf(g_last_error, sizeof(g_last_error), "业务查询被拒绝：结果码 %d", rc);
+        return (int32_t)rc;
+    }
+
+    body = vms_tlv_find(resp, rlen, Q_IPC_T_BODY, &blen);
+    if (!body || blen == 0u)
+    {
+        set_error("业务响应缺少 BODY", VMS_ERR_INTERNAL);
+        return VMS_ERR_INTERNAL;
+    }
+    if ((size_t)blen >= sizeof(json))
+    {
+        set_error("业务响应过长", VMS_ERR_BUFFER_SMALL);
+        return VMS_ERR_BUFFER_SMALL;
+    }
+    memcpy(json, body, blen);
+    json[blen] = '\0';
+
+    rc = vms_stats_from_json(ctx, json);
+    if (rc < 0)
+        return VMS_ERR_INTERNAL;
+    return (int32_t)rc;   /* 0 或下游结果码 */
+}
+
+int32_t VMS_CALL vms_get_stats(vms_context* ctx, vms_stats* out_stats)
 {
     if (!ctx || !out_stats) return VMS_ERR_INVALID_ARG;
+
+    if (ctx->logged_in && ctx->sess)
+    {
+        int32_t rc = vms_fetch_stats(ctx);
+        if (rc != VMS_OK) return rc;   /* 已登录：失败即报错，不回退 Mock */
+    }
+
     *out_stats = ctx->stats;
     return VMS_OK;
 }

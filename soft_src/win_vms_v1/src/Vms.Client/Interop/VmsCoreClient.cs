@@ -12,6 +12,32 @@ public sealed record NativeProbeResult(bool Success, string Message, string? Dll
 }
 
 /// <summary>
+/// 登录参数（M1）。口令只在 <see cref="VmsCoreClient.Login"/> 调用期间存在于栈上结构体，
+/// 调用结束即清零 —— 调用方不要自行缓存/落盘。
+/// </summary>
+/// <param name="Host">netd 主机（IPv4 / 域名）</param>
+/// <param name="Port">netd 端口（默认 18099）</param>
+/// <param name="User">用户名</param>
+/// <param name="Password">口令（不外发，仅本地派生 PBKDF2-SM3）</param>
+/// <param name="Otp">动态口令；服务端未启用校验时可留空</param>
+/// <param name="DeviceIdHex">设备指纹 hex（偶数长度）；留空用 native 内置值</param>
+/// <param name="ServerPubKeyPath">服务端静态 SM2 公钥 DER 路径（必填，抗中间人）</param>
+/// <param name="KnockEndpoint">knockd 的 “ip:port”；未部署端口隐身时留空</param>
+/// <param name="SpaKeyPath">SPA 密钥文件路径（16B），随 KnockEndpoint 使用</param>
+/// <param name="Pbkdf2Iterations">派生迭代次数；0 = 用协议默认 100000</param>
+public sealed record LoginOptions(
+    string Host,
+    int Port,
+    string User,
+    string Password,
+    string? Otp = null,
+    string? DeviceIdHex = null,
+    string? ServerPubKeyPath = null,
+    string? KnockEndpoint = null,
+    string? SpaKeyPath = null,
+    int Pbkdf2Iterations = 0);
+
+/// <summary>
 /// 对 native 核心库的高层托管封装：负责
 ///   1. ABI 自检（版本 + 结构体尺寸）；
 ///   2. 生命周期（SafeHandle 语义的 create/destroy）；
@@ -31,13 +57,14 @@ public sealed record NativeProbeResult(bool Success, string Message, string? Dll
 /// </summary>
 internal sealed unsafe class VmsCoreClient : IDisposable
 {
-    private const uint ExpectedAbiVersion = 2;
+    private const uint ExpectedAbiVersion = 3;   // v3：新增 vms_credentials + vms_login/logout/heartbeat
 
     private readonly DispatcherQueue? _uiQueue;
     private GCHandle _selfHandle;
     private IntPtr _ctx;
     private bool _subscribed;
     private bool _disposed;
+    private bool _loggedIn;      // M1：是否通过真实后台认证（false = 仍在用 Mock 数据）
 
     private VmsCoreClient(IntPtr ctx, DispatcherQueue? uiQueue)
     {
@@ -68,6 +95,7 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             Check(NativeStructKind.Company, sizeof(NativeCompany), nameof(NativeCompany), mismatches);
             Check(NativeStructKind.Vehicle, sizeof(NativeVehicle), nameof(NativeVehicle), mismatches);
             Check(NativeStructKind.Query, sizeof(NativeQuery), nameof(NativeQuery), mismatches);
+            Check(NativeStructKind.Credentials, sizeof(NativeCredentials), nameof(NativeCredentials), mismatches);
 
             if (mismatches.Count > 0)
                 return NativeProbeResult.Fail("结构体布局与 native 不一致：" + string.Join("; ", mismatches));
@@ -125,6 +153,77 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             throw;
         }
     }
+
+    // ============================ M1：真实登录 ============================
+
+    /// <summary>登录结果。<see cref="Code"/>：0 成功；&gt;0 服务端结果码（Q_IPC_R_*，3=Token/凭据问题）；&lt;0 本库错误码。</summary>
+    public sealed record LoginResult(bool Success, int Code, string Message);
+
+    /// <summary>
+    /// 真实登录：SPA 敲门（可选）→ SM2 握手 → HELLO → 取 salt → 本地 PBKDF2-SM3 → LOGIN。
+    /// 口令只在本结构体内存留到调用结束（native 侧派生后即清零），**不要**记录到日志/配置。
+    /// </summary>
+    public LoginResult Login(LoginOptions opt)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(opt);
+        if (string.IsNullOrWhiteSpace(opt.ServerPubKeyPath))
+            throw new ArgumentException("必须提供服务端 SM2 公钥路径（用于校验服务端身份，抗中间人）", nameof(opt));
+        if (opt.Port is <= 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(opt), "端口非法");
+
+        var native = new NativeCredentials
+        {
+            Port = (ushort)opt.Port,
+            Pbkdf2Iter = (uint)Math.Max(0, opt.Pbkdf2Iterations),
+        };
+        Utf8.Write(native.Host, NativeCredentials.HostMax, opt.Host);
+        Utf8.Write(native.User, NativeCredentials.UserMax, opt.User);
+        Utf8.Write(native.Otp, NativeCredentials.OtpMax, opt.Otp);
+        Utf8.Write(native.DevIdHex, NativeCredentials.DevIdHexMax, opt.DeviceIdHex);
+        Utf8.Write(native.PubKeyPath, NativeCredentials.PathMax, opt.ServerPubKeyPath);
+        Utf8.Write(native.Knock, NativeCredentials.HostMax, opt.KnockEndpoint);
+        Utf8.Write(native.SpaKeyPath, NativeCredentials.PathMax, opt.SpaKeyPath);
+
+        int rc;
+        try
+        {
+            Utf8.Write(native.Password, NativeCredentials.PassMax, opt.Password);
+            rc = NativeMethods.vms_login(_ctx, in native);
+        }
+        finally
+        {
+            // 口令用完即清：结构体在栈上，但仍显式清零，避免被后续栈帧/崩溃转储带走
+            Utf8.Write(native.Password, NativeCredentials.PassMax, null);
+        }
+
+        _loggedIn = rc == 0;
+        if (rc == 0) return new LoginResult(true, 0, "登录成功");
+
+        var msg = rc > 0
+            ? $"服务端拒绝登录：结果码 {rc}" + (rc == 3 ? "（Token/凭据问题，需重新登录）" : "")
+            : NativeMethods.DescribeError(_ctx, rc);
+        return new LoginResult(false, rc, msg);
+    }
+
+    public void Logout()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        NativeMethods.vms_logout(_ctx);
+        _loggedIn = false;
+    }
+
+    /// <summary>
+    /// 心跳保活。注意：后台心跳**不续期** Token（TTL 1800s），
+    /// 到期后业务请求会返回结果码 3，上层需自动重登。
+    /// </summary>
+    public int Heartbeat()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return NativeMethods.vms_heartbeat(_ctx);
+    }
+
+    /// <summary>是否已通过真实后台认证（false 表示仍在用内置 Mock 数据）。</summary>
+    public bool IsLoggedIn => _loggedIn;
 
     // ================================ 数据 ================================
 

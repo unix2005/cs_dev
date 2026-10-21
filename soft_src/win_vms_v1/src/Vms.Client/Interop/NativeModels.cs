@@ -35,6 +35,7 @@ internal enum NativeStructKind
     Company = 3,
     Vehicle = 4,
     Query = 5,
+    Credentials = 6,
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -113,6 +114,36 @@ internal unsafe struct NativeQuery
     public fixed byte Keyword[NativeVehicle.TextMax];
     public fixed uint Ids[QueryMaxIds];
     public uint IdCount;
+}
+
+/// <summary>
+/// 登录凭据（对应 <c>vms_credentials</c>，ABI v3 新增）。
+/// 字段顺序 / 长度 / Pack 必须与 vms_api.h 完全一致，启动自检会比对 sizeof。
+/// 口令只在本次调用期间存在于本结构体（UTF-8 字节），**不得**落盘或写日志：
+/// native 侧会本地派生 PBKDF2-SM3，外发的只有 32 字节派生值。
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeCredentials
+{
+    public const int HostMax = 64;        // VMS_HOST_MAX
+    public const int UserMax = 64;        // VMS_USER_MAX
+    public const int PassMax = 64;        // VMS_PASS_MAX
+    public const int OtpMax = 16;         // VMS_OTP_MAX
+    public const int DevIdHexMax = 65;    // VMS_DEVID_HEX_MAX
+    public const int PathMax = 260;       // VMS_PATH_MAX
+
+    public fixed byte Host[HostMax];
+    public ushort Port;
+    public ushort Reserved16;             // 对齐填充，置 0
+    public fixed byte User[UserMax];
+    public fixed byte Password[PassMax];
+    public fixed byte Otp[OtpMax];
+    public fixed byte DevIdHex[DevIdHexMax];
+    public fixed byte PubKeyPath[PathMax];  // 服务端 SM2 公钥 DER（必填，抗中间人）
+    public fixed byte Knock[HostMax];       // "ip:port"；空 = 不敲门
+    public fixed byte SpaKeyPath[PathMax];  // SPA 密钥文件（随 Knock 使用）
+    public uint Pbkdf2Iter;                 // 0 = 用协议默认 100000
+    public uint Reserved;
 }
 
 /// <summary>从 <c>fixed byte[]</c> 读 UTF-8 字符串的小工具，零分配读取路径。</summary>

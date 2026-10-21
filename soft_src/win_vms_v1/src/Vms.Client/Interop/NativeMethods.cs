@@ -48,6 +48,22 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial int vms_disconnect(IntPtr ctx);
 
+    // ------------------------- M1：真实登录闭环（ABI v3） -------------------------
+    // 返回值：0 = 成功；>0 = 服务端结果码（Q_IPC_R_*，3 = Token/凭据问题需重登）；
+    //         <0 = 本库错误码，详情用 vms_last_error 取。
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_login")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_login(IntPtr ctx, in NativeCredentials cred);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_logout")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_logout(IntPtr ctx);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_heartbeat")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_heartbeat(IntPtr ctx);
+
     [LibraryImport(LibraryName, EntryPoint = "vms_is_connected")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial int vms_is_connected(IntPtr ctx);

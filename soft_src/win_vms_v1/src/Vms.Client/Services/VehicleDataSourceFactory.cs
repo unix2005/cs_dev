@@ -37,6 +37,48 @@ public static class VehicleDataSourceFactory
                 NativeProbeResult.Fail($"native 初始化失败，已降级：{ex.Message}"));
         }
     }
+    /// <summary>
+    /// 从环境变量装配登录参数（M2：先把「状态栏显示真实数据」这条链路打通，
+    /// 正式登录对话框 / 凭据保管留到 M3）。
+    ///
+    /// 必需：VMS_HOST / VMS_USER / VMS_PASS / VMS_PUBKEY
+    /// 可选：VMS_PORT(默认18099) / VMS_OTP / VMS_DEVID_HEX / VMS_KNOCK / VMS_SPA_KEY / VMS_PBKDF2_ITER
+    /// 必需项不全时返回 null —— 此时 native 仍返回内置 Mock，界面照常工作。
+    ///
+    /// 注意口令走环境变量只为联调方便，**生产环境不要这么做**（进程环境可被同权限进程读取），
+    /// 应改为登录框输入 + Windows 凭据管理器保管。
+    /// </summary>
+    public static LoginOptions? TryCreateLoginOptionsFromEnvironment()
+    {
+        var host = Environment.GetEnvironmentVariable("VMS_HOST");
+        var user = Environment.GetEnvironmentVariable("VMS_USER");
+        var pass = Environment.GetEnvironmentVariable("VMS_PASS");
+        var pub  = Environment.GetEnvironmentVariable("VMS_PUBKEY");
+
+        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(user)
+            || string.IsNullOrWhiteSpace(pass) || string.IsNullOrWhiteSpace(pub))
+            return null;
+
+        var port = 18099;
+        if (int.TryParse(Environment.GetEnvironmentVariable("VMS_PORT"), out var p) && p is > 0 and <= 65535)
+            port = p;
+
+        _ = int.TryParse(Environment.GetEnvironmentVariable("VMS_PBKDF2_ITER"), out var iter);
+
+        return new LoginOptions(
+            Host: host,
+            Port: port,
+            User: user,
+            Password: pass,
+            Otp: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_OTP")),
+            DeviceIdHex: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_DEVID_HEX")),
+            ServerPubKeyPath: pub,
+            KnockEndpoint: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_KNOCK")),
+            SpaKeyPath: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_SPA_KEY")),
+            Pbkdf2Iterations: iter);
+    }
+
+    private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
 }
 
 /// <summary>把 native 返回的扁平组织记录装配成 <see cref="CompanyNode"/> 树。</summary>

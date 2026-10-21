@@ -40,9 +40,11 @@ extern "C" {
 #endif
 
 /* --------------------------------- 版本 ----------------------------------- */
-#define VMS_ABI_VERSION  2u
+/* v3：新增 vms_credentials + vms_login/vms_logout/vms_heartbeat（M1 登录闭环）。
+   仅在尾部追加函数与结构体，不改动既有结构布局。 */
+#define VMS_ABI_VERSION  3u
 #define VMS_VER_MAJOR    1
-#define VMS_VER_MINOR    0
+#define VMS_VER_MINOR    1
 #define VMS_VER_PATCH    0
 
 /* -------------------------------- 错误码 ---------------------------------- */
@@ -147,6 +149,32 @@ typedef struct vms_query {
     uint32_t id_count;
 } vms_query;
 
+/* ============================ M1：登录凭据 ============================ */
+/* 三端共用同一套语义：host/port = netd；pubkey_path = 服务端静态 SM2 公钥 DER（抗中间人）；
+   knock/spa_key_path 仅在部署了 knockd 时需要（UDP 单包授权，端口隐身）。
+   口令仅用于本地派生 PBKDF2-SM3，**不落盘、不外发**（外发的只是 32B 派生值）。 */
+#define VMS_HOST_MAX       64
+#define VMS_USER_MAX       64
+#define VMS_PASS_MAX       64
+#define VMS_OTP_MAX        16
+#define VMS_DEVID_HEX_MAX  65
+#define VMS_PATH_MAX       260
+
+typedef struct vms_credentials {
+    char     host[VMS_HOST_MAX];         /* netd 主机：IPv4 点分十进制或域名 */
+    uint16_t port;                       /* netd 端口（默认 18099） */
+    uint16_t reserved16;                 /* 对齐填充，置 0 */
+    char     user[VMS_USER_MAX];         /* 用户名（UTF-8） */
+    char     password[VMS_PASS_MAX];     /* 口令（UTF-8，仅内存） */
+    char     otp[VMS_OTP_MAX];           /* 动态口令（服务端未启用校验时可为空） */
+    char     devid_hex[VMS_DEVID_HEX_MAX]; /* 设备指纹 hex（偶数长度；空则用内置默认） */
+    char     pubkey_path[VMS_PATH_MAX];  /* 服务端 SM2 公钥 DER 路径（**必填**） */
+    char     knock[VMS_HOST_MAX];        /* knockd 的 "ip:port"；空 = 不敲门 */
+    char     spa_key_path[VMS_PATH_MAX]; /* SPA 密钥文件（16B）；随 knock 使用 */
+    uint32_t pbkdf2_iter;                /* 0 = 用协议默认 Q_PBKDF2_ITER_DEFAULT(100000) */
+    uint32_t reserved;
+} vms_credentials;
+
 typedef struct vms_context vms_context; /* 不透明句柄（opaque handle） */
 
 #pragma pack(pop)
@@ -157,7 +185,8 @@ typedef enum vms_struct_kind {
     VMS_STRUCT_STATS    = 2,
     VMS_STRUCT_COMPANY  = 3,
     VMS_STRUCT_VEHICLE  = 4,
-    VMS_STRUCT_QUERY    = 5
+    VMS_STRUCT_QUERY    = 5,
+    VMS_STRUCT_CREDENTIALS = 6
 } vms_struct_kind;
 
 /* ------------------------------- 回调类型 --------------------------------- */
@@ -180,8 +209,26 @@ VMS_API int32_t VMS_CALL vms_connect(vms_context* ctx, const char* endpoint);
 VMS_API int32_t VMS_CALL vms_disconnect(vms_context* ctx);
 VMS_API int32_t VMS_CALL vms_is_connected(const vms_context* ctx);
 
+/* -------------------------- M1：真实登录闭环 -------------------------- */
+/* 与后台建立会话：SPA 敲门（可选）-> TCP + SM2 握手 -> HELLO -> SALT_QUERY
+   -> 本地 PBKDF2-SM3 派生 -> LOGIN（取 32B Token）。
+   返回 VMS_OK 表示已认证；>0 为服务端结果码（见 include_ipc_proto.h Q_IPC_R_*，
+   3 = Token/凭据问题，需重新登录）；<0 为本库错误码（vms_last_error 取详情）。
+   失败时 ctx 保持可用，可修正凭据后重试；已登录时再次调用会先登出再登录。 */
+VMS_API int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred);
+/* 登出（保持 TCP 连接可复用）；返回 VMS_OK 或负错误码 */
+VMS_API int32_t VMS_CALL vms_logout(vms_context* ctx);
+/* 心跳保活；注意：后台心跳**不续期** Token，TTL(1800s) 到期后业务会返回 3 */
+VMS_API int32_t VMS_CALL vms_heartbeat(vms_context* ctx);
+
 /* --------------------------------- 数据 ---------------------------------- */
-VMS_API int32_t VMS_CALL vms_get_stats(const vms_context* ctx, vms_stats* out_stats);
+/* 全量统计。
+ * 语义（M2 起）：**已登录**时向后台发一次 BIZ_QUERY(biz_type=stats) 取真实数据并更新缓存；
+ *               **未登录**时返回内置 Mock（让 UI 在无后端时仍可跑）。
+ * 已登录但查询失败时**不**回退 Mock —— 宁可让 UI 报错，也不能给运维看假数字；
+ * 返回 >0 = 服务端结果码（见 Q_IPC_R_*），<0 = 本地错误。
+ * 注意：本函数会阻塞做一次网络往返，调用方须放后台线程。 */
+VMS_API int32_t VMS_CALL vms_get_stats(vms_context* ctx, vms_stats* out_stats);
 
 /* 两次调用范式：cap=0 时只回填 *out_count = 总条数，返回 VMS_ERR_BUFFER_SMALL。
  * 缓冲区够则返回 VMS_OK，*out_count = 实际写入条数。 */

@@ -43,5 +43,15 @@ internal sealed class NativeVehicleDataSource : IVehicleDataSource
 
     public void StartRealtime() => _client.Subscribe();
     public void StopRealtime() => _client.Unsubscribe();
+
+    /// <summary>是否已完成真实后台登录（false = 数据仍是 native 内置 Mock）。</summary>
+    public bool IsLoggedIn => _client.IsLoggedIn;
+
+    /// <summary>
+    /// 真实登录（M2）。**必须**走 Task.Run：native 侧是阻塞式网络调用，
+    /// 网络不可达时会卡到 socket 超时（30s）才返回，绝不能在 UI 线程调用。
+    /// </summary>
+    public Task<VmsCoreClient.LoginResult> LoginAsync(LoginOptions opt, CancellationToken ct = default)
+        => Task.Run(() => _client.Login(opt), ct);
     public void Dispose() => _client.Dispose();
 }

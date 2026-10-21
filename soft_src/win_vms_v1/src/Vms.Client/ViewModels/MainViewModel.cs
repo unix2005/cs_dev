@@ -135,8 +135,43 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             StatusMessage = $"实时推送启动失败，已降级为静态数据：{ex.Message}";
         }
 
+        // M2：环境变量齐备则尝试真实登录（失败不阻断启动，状态栏如实说明"仍是模拟数据"）。
+        // 必须在 RefreshStatsAsync 之前：登录成功后 vms_get_stats 才会真正走后台。
+        await TryAutoLoginAsync(ct);
+
         await Monitor.InitializeAsync(ct);
         await RefreshStatsAsync(ct);
+    }
+
+    /// <summary>
+    /// 自动登录：凭据来自环境变量（见 VehicleDataSourceFactory.TryCreateLoginOptionsFromEnvironment）。
+    /// 定位是**联调通道** —— 让"状态栏显示真实数据"无需 UI 改造即可端到端验证；
+    /// 正式的登录对话框 + 凭据保管在 M3 做。
+    /// </summary>
+    private async Task TryAutoLoginAsync(CancellationToken ct)
+    {
+        var opt = VehicleDataSourceFactory.TryCreateLoginOptionsFromEnvironment();
+        if (opt is null || _bundle.Source is not NativeVehicleDataSource native)
+            return;
+
+        try
+        {
+            var r = await native.LoginAsync(opt, ct);
+            if (r.Success)
+            {
+                BackendBadge = $"{_bundle.Source.BackendName} · 已登录";
+                StatusMessage = $"已连接后台 {opt.Host}:{opt.Port}，状态栏为真实数据";
+            }
+            else
+            {
+                StatusMessage = $"登录失败：{r.Message}（仍显示内置模拟数据）";
+            }
+        }
+        catch (Exception ex)
+        {
+            // 登录失败绝不能让界面起不来：维持 Mock 数据源，只把原因说清楚
+            StatusMessage = $"登录异常：{ex.Message}（仍显示内置模拟数据）";
+        }
     }
 
     public async Task RefreshStatsAsync(CancellationToken ct = default)
