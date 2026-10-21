@@ -25,6 +25,6 @@ QLIBS  = $(call ld_group, \
 # （目标机未装 libnftables-dev，无 libq... 链接名）。运行期由 ldconfig 解析。
 # seccomp 沙箱已移入 libqcommon（daemon_seccomp_apply）；-lseccomp 由该库符号拉取，
 # 此处保留以确保链接期解析（libqcommon.a 引用 libseccomp）。
-LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64 -l:libnftables.so.1 -lseccomp
+LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 -L$(DEP_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(DEP_HOME)/tongsuo/lib64 -l:libnftables.so.1 -lseccomp
 
 include ../../include/Makefile.inc

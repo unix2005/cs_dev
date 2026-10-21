@@ -38,11 +38,15 @@ void netd_next_req_id(char *buf, size_t cap)
         snprintf(buf, cap, "%llu", n);
 }
 
-/* 请求：  [len:4][TLV(CMD)][TLV(BODY)][TLV(SRC_IP)][TLV(CHANID)][TLV(USERID)][TLV(REQID)] */
+/* 请求：  [len:4][TLV(CMD)][TLV(BODY)][TLV(SRC_IP)][TLV(CHANID)][TLV(USERID)][TLV(TOKEN)?][TLV(REQID)]
+ * token   : 已认证连接的会话 Token（32B）；NULL 表示不带（如 LOGIN 阶段尚无 Token）。
+ *           bizd 只从外层 Q_IPC_T_TOKEN 取 token 转给下游做鉴权，
+ *           若已登录的业务请求不带它，下游看到的 token 恒为全零 —— 鉴权链路会静默失效。 */
 static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
                             const uint8_t *body, size_t blen,
                             const netd_addr_t *src, const uint8_t chanid[32],
-                            const uint8_t userid[32], const char *reqid)
+                            const uint8_t userid[32], const char *reqid,
+                            const uint8_t token[32])
 {
     size_t off = Q_IPC_LENPFX, n = 0u;
     uint8_t u16[2], ipb[17];
@@ -74,6 +78,10 @@ static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
                                      userid, 32, &n) == 0)
         off += n;
 
+    if (token && q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_TOKEN,
+                                    token, Q_CHAN_TOKEN_LEN, &n) == 0)
+        off += n;
+
     if (reqid && reqid[0])
     {
         size_t rl = strlen(reqid);
@@ -94,7 +102,7 @@ static size_t ipc_build_req(uint8_t *out, size_t outcap, uint16_t cmd,
 int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
                 const uint8_t *body, size_t blen,
                 const uint8_t chanid[32], const uint8_t userid[32],
-                const char *reqid,
+                const uint8_t token[32], const char *reqid,
                 uint32_t *result, uint8_t *out, size_t outcap, size_t *out_len)
 {
     uint8_t  req[Q_IPC_LENPFX + 3u * (4u + Q_IPC_TLV_MAX) + 64u];
@@ -121,7 +129,7 @@ int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
     }
 
     reqlen = ipc_build_req(req, sizeof(req), cmd, body, blen, src,
-                           chanid, userid, reqid);
+                           chanid, userid, reqid, token);
 
     if (q_ipc_connect(g_cfg.ipc_path, &fd) != 0)
     {

@@ -23,8 +23,10 @@
  *   # netd 的公网 TCP 监听规则仅允许 ip saddr @allow4 / ip6 saddr @allow6 放行
  *   # 开门动作经 libnftables（netlink）直连内核，无需安装 nft 命令行工具
  *
- * 注意：本文件依赖 epoll（Linux），仅能在 Linux 构建与运行；
- *       macOS 等非 Linux 平台 q_reactor_create 返回 NULL，编译/运行均不可用。
+ * 注意：本进程为后台守护进程，**生产只部署于 Linux**（依赖本机 nftables + CAP_NET_ADMIN），
+ *       事件循环走 q_reactor 的 epoll 后端；q_reactor 库层本身已支持 kqueue / WSAPoll
+ *       （供 macOS / Windows 开发机调试，与"本进程只跑 Linux"并不冲突），
+ *       但 knockd 不作为跨平台目标，无需在非 Linux 平台验证。
  */
 #include "srv_knockd.h"
 

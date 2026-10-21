@@ -82,6 +82,14 @@ static void add_ipstr(cJSON *o, const char *k, uint8_t fam, const uint8_t *addr)
     cJSON_AddStringToObject(o, k, buf);
 }
 
+/* 内层 TLV 字段在下游 JSON 里的承载方式 */
+typedef enum
+{
+    FIELD_HEX  = 0,   /* 二进制 -> hex 字符串（凭据类，下游按 hex 解码） */
+    FIELD_TEXT,       /* UTF-8 文本原样（业务子类型 / 参数） */
+    FIELD_U32         /* uint32 大端 -> JSON number */
+} field_kind_t;
+
 /* tag -> 字段名（未知返回 NULL，交由调用方按 hex 透传） */
 static const char *field_name_of(uint16_t tag)
 {
@@ -93,11 +101,33 @@ static const char *field_name_of(uint16_t tag)
     case Q_IPC_T_DEVID:    return "device_id";
     case Q_IPC_T_CVER:     return "client_ver";
     case Q_IPC_T_AUTHTOK:  return "token";
+    /* —— 业务参数段（M2）—— */
+    case Q_IPC_T_BIZ_TYPE:    return "biz_type";
+    case Q_IPC_T_BIZ_PARAM:   return "biz_param";
+    case Q_IPC_T_PAGE_OFFSET: return "offset";
+    case Q_IPC_T_PAGE_LIMIT:  return "limit";
     default:               return NULL;
     }
 }
 
-/* 内层 TLV 业务体 -> cJSON params 对象；二进制字段统一 hex 字符串承载 */
+/* tag -> 承载方式：0x01xx 凭据类保持 hex（登录服务已按 hex 解析，改了就是协议漂移）；
+   0x02xx 业务段按语义传（文本原样 / uint32 数值），避免下游再解一层 hex。 */
+static field_kind_t field_kind_of(uint16_t tag)
+{
+    switch (tag)
+    {
+    case Q_IPC_T_BIZ_TYPE:
+    case Q_IPC_T_BIZ_PARAM:
+        return FIELD_TEXT;
+    case Q_IPC_T_PAGE_OFFSET:
+    case Q_IPC_T_PAGE_LIMIT:
+        return FIELD_U32;
+    default:
+        return FIELD_HEX;
+    }
+}
+
+/* 内层 TLV 业务体 -> cJSON params 对象 */
 static cJSON *body_to_params(const uint8_t *body, size_t blen)
 {
     cJSON *params = cJSON_CreateObject();
@@ -112,6 +142,8 @@ static cJSON *body_to_params(const uint8_t *body, size_t blen)
         const uint8_t *val  = NULL;
         size_t         used = 0u;
         const char    *name;
+        field_kind_t   kind;
+        char           key[16];
         char          *hx;
 
         if (q_codec_tlv_decode(body + off, blen - off, &tag, &val, &vlen, &used) != 0)
@@ -119,18 +151,46 @@ static cJSON *body_to_params(const uint8_t *body, size_t blen)
         off += used;
 
         name = field_name_of(tag);
-        hx   = to_hex(val, vlen);
+        kind = field_kind_of(tag);
+        if (!name)
+        {
+            snprintf(key, sizeof(key), "tag_%04x", (unsigned)tag);
+            name = key;
+        }
+
+        if (kind == FIELD_U32)
+        {
+            /* 长度必须是 4；不对则丢弃该字段（不把畸形值透给下游） */
+            if (vlen == 4u)
+                cJSON_AddNumberToObject(params, name,
+                                        (double)(((uint32_t)val[0] << 24) |
+                                                 ((uint32_t)val[1] << 16) |
+                                                 ((uint32_t)val[2] << 8)  |
+                                                 (uint32_t)val[3]));
+            continue;
+        }
+
+        if (kind == FIELD_TEXT)
+        {
+            /* 文本型拒绝内嵌 NUL：cJSON 按 strlen 取串，内嵌 NUL 会造成"截断欺骗"
+               （下游看到的值与签名/审计看到的字节不一致），故整字段丢弃。 */
+            char *s;
+            if (vlen == 0u || memchr(val, 0, vlen))
+                continue;
+            s = (char *)malloc((size_t)vlen + 1u);
+            if (!s)
+                continue;
+            memcpy(s, val, vlen);
+            s[vlen] = '\0';
+            cJSON_AddStringToObject(params, name, s);
+            free(s);
+            continue;
+        }
+
+        hx = to_hex(val, vlen);
         if (!hx)
             continue;
-
-        if (name)
-            cJSON_AddStringToObject(params, name, hx);
-        else
-        {
-            char key[16];
-            snprintf(key, sizeof(key), "tag_%04x", (unsigned)tag);
-            cJSON_AddStringToObject(params, key, hx);
-        }
+        cJSON_AddStringToObject(params, name, hx);
         free(hx);
     }
     return params;
@@ -244,6 +304,9 @@ static int bizd_hnd_salt(uint16_t cmd, const uint8_t *body, size_t body_len,
     char         *req = NULL, *rsp = NULL;
     size_t        off = 0u, n = 0u;
     uint8_t       rb[4];
+    uint8_t       raw[64];            /* salt 原始字节（上限 64B） */
+    int           rawlen = 0;         /* >0 表示成功取到 salt */
+    uint32_t      result = Q_IPC_R_UNAVAILABLE;
     int           rc = -1;
 
     if (!u || !u->g || !u->c)
@@ -269,25 +332,31 @@ static int bizd_hnd_salt(uint16_t cmd, const uint8_t *body, size_t body_len,
         goto out;
 
     if (bizd_route_call(cmd, req, &rsp) != 0 || !rsp)
+    {
+        result = Q_IPC_R_UNAVAILABLE;   /* 下游不可达：仍回 RESULT，避免客户端空等至超时 */
+        rc = 0;
         goto out;
+    }
 
     rsp_json = cJSON_Parse(rsp);
     if (!rsp_json)
+    {
+        result = Q_IPC_R_INTERNAL;
+        rc = 0;
         goto out;
+    }
 
     rj = cJSON_GetObjectItem(rsp_json, "result");
-    if (!rj || rj->type != cJSON_Number || (int)(rj->valuedouble) != (int)Q_IPC_R_OK)
+    if (!rj || rj->type != cJSON_Number)
     {
-        int result = rj ? (int)(rj->valuedouble) : (int)Q_IPC_R_UNAVAILABLE;
-        bizd_put_be32(rb, (uint32_t)result);
-        if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
-        {
-            off += n;
-            *out_len = off;
-        }
+        result = Q_IPC_R_INTERNAL;
         rc = 0;
-        goto out_json;
+        goto out;
     }
+    result = (uint32_t)(rj->valuedouble);
+    rc = 0;                             /* 下游已应答：结果码原样透传，不视为转发失败 */
+    if (result != (uint32_t)Q_IPC_R_OK)
+        goto out;
 
     data     = cJSON_GetObjectItem(rsp_json, "data");
     salt_obj = data ? cJSON_GetObjectItem(data, "salt") : NULL;
@@ -295,35 +364,33 @@ static int bizd_hnd_salt(uint16_t cmd, const uint8_t *body, size_t body_len,
     {
         const char *hex  = salt_obj->valuestring;
         size_t      hlen = strlen(hex);
-        uint8_t    *raw  = (uint8_t *)malloc(hlen / 2u + 1u);
-        int         slen = -1;
 
-        if (raw)
+        if (hlen / 2u > 0u && hlen / 2u <= sizeof(raw))
+            rawlen = bizd_from_hex(hex, hlen, raw, sizeof(raw));
+    }
+    if (rawlen <= 0)
+        result = Q_IPC_R_BADREQ;        /* 下游没给 salt：显式报错，不要回空响应 */
+
+out:
+    /*
+     * 统一出口：**任何**路径都必须回带 RESULT —— 否则 netd 透传空响应，
+     * 客户端会一直阻塞到 socket 超时（30s）才失败，排障时表现为「登录卡死」。
+     */
+    bizd_put_be32(rb, result);
+    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
+    {
+        off += n;
+        if (result == (uint32_t)Q_IPC_R_OK && rawlen > 0)
         {
-            slen = bizd_from_hex(hex, hlen, raw, hlen / 2u + 1u);
-            if (slen > 0)
-            {
-                bizd_put_be32(rb, (uint32_t)Q_IPC_R_OK);
-                if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4u, &n) == 0)
-                {
-                    off += n;
-                    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_BODY,
-                                           raw, (uint16_t)slen, &n) == 0)
-                    {
-                        off += n;
-                        *out_len = off;
-                        rc = 0;
-                    }
-                }
-            }
-            free(raw);
+            if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_BODY,
+                                   raw, (uint16_t)rawlen, &n) == 0)
+                off += n;
         }
+        *out_len = off;
     }
 
-out_json:
     if (rsp_json)
         cJSON_Delete(rsp_json);
-out:
     if (req)
         free(req);
     if (rsp)

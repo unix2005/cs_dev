@@ -13,11 +13,18 @@ TARGET  = q_service_login
 OBJS    = main.o login_util.o login_handler.o login_srv.o
 
 # —— 分层依赖：本项目库静态链接(.a)，运行期不依赖 libq*.so ——
+# cJSON（vendored，走 DEP_HOME 依赖根）+ pthread；
+# 注：不可只写 -lcjson 依赖系统路径 —— 交叉编译/其它平台未必有系统 libcjson。
+#     本服务还需要 q_crypto 的 PBKDF2-SM3（口令派生），故闭包里含 libqcrypto。
 QLIBS  = $(call ld_group, \
          $(LIB)/libqcommon.a $(LIB)/libqreactor.a \
          $(LIB)/libqnet.a $(LIB)/libqlog.a $(LIB)/libqmem.a \
-         $(LIB)/libqrand.a)
-# cJSON（lib/ 或系统 /usr/lib/x86_64-linux-gnu 均可解析）+ pthread
-LIBS   = $(QLIBS) $(LIB_PTHREAD) -lcjson
+         $(LIB)/libqrand.a $(LIB)/libqcrypto.a $(LIB)/libqutil.a)
+LIBS   = $(QLIBS) $(LIB_PTHREAD) \
+         -L$(DEP_HOME)/cjson/lib -lcjson -Wl,-rpath,$(DEP_HOME)/cjson/lib \
+         -L$(DEP_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(DEP_HOME)/tongsuo/lib64
+
+# cJSON 头文件（include_xml.h -> cJSON.h）：必须走 SOFT_INCL，Makefile.inc 会展开成 -I
+SOFT_INCL = . $(DEP_HOME)/cjson/include
 
 include ../../include/Makefile.inc

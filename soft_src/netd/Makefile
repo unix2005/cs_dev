@@ -21,7 +21,10 @@ QLIBS  = $(call ld_group, \
          $(LIB)/libqcodec.a $(LIB)/libqipc.a $(LIB)/libqcrypto.a \
          $(LIB)/libqrand.a $(LIB)/libqutil.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
 # 注：q_xcfg 依赖系统 libxml2（与 knockd 一致）；pthread 供 reactor 线程池
-LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64 -lseccomp
+#     Tongsuo 走 DEP_HOME（三端依赖根），交叉编译时用 make DEP_HOME=... 覆盖
+LIBS   = $(QLIBS) $(LIB_PTHREAD) -lxml2 \
+         -L$(DEP_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(DEP_HOME)/tongsuo/lib64 \
+         -lseccomp
 # 注：seccomp 沙箱已移入共享库 libqcommon（daemon_seccomp_apply，profile=1=netd），
 #     -lseccomp 由该库符号拉取（libseccomp 高层 API，多线程须放行 clone）
 

@@ -18,9 +18,17 @@ struct login_ctx g_login;
 
 static void usage(const char *argv0)
 {
-    fprintf(stderr, "用法: %s [-p <端口>] [-u <用户名>] [-k <密码>] [-h]\n", argv0);
-    fprintf(stderr, "  默认: 端口=%d 用户=%s\n", LOGIN_PORT_DEF, LOGIN_USER_DEF);
-    fprintf(stderr, "  优先级: 命令行 > 环境(LOGIN_PORT/LOGIN_USER/LOGIN_PASS) > 内置默认\n");
+    fprintf(stderr, "用法: %s [-p <端口>] [-u <用户名>] [-k <密码>] [-S <salt hex>] "
+                    "[-K <pwd_hash hex>] [-i <iter>] [-O <otp>] [-h]\n", argv0);
+    fprintf(stderr, "  默认: 端口=%d 用户=%s iter=%u\n",
+            LOGIN_PORT_DEF, LOGIN_USER_DEF, LOGIN_PBKDF2_ITER_DEF);
+    fprintf(stderr, "  -S  账号 salt（%d 字节的 hex，%d 字符）；缺省则启动时随机生成并打印\n",
+            LOGIN_SALT_LEN, LOGIN_SALT_LEN * 2);
+    fprintf(stderr, "  -K  期望 PBKDF2-SM3(口令,salt,iter)（%d 字节的 hex，%d 字符）；"
+                    "缺省由 -k 口令现算\n", LOGIN_PWDHASH_LEN, LOGIN_PWDHASH_LEN * 2);
+    fprintf(stderr, "  -O  期望动态口令（6 位等）；缺省不校验 OTP\n");
+    fprintf(stderr, "  优先级: 命令行 > 环境(LOGIN_PORT/LOGIN_USER/LOGIN_PASS/LOGIN_SALT/"
+                    "LOGIN_PWD_HASH/LOGIN_PBKDF2_ITER/LOGIN_OTP) > 内置默认\n");
 }
 
 void login_cfg_defaults(void)
@@ -36,6 +44,8 @@ void login_cfg_defaults(void)
     g_lcfg.log_max_size   = 10u * 1024u * 1024u;
     snprintf(g_lcfg.user, sizeof(g_lcfg.user), "%s", LOGIN_USER_DEF);
     snprintf(g_lcfg.pass, sizeof(g_lcfg.pass), "%s", LOGIN_PASS_DEF);
+    g_lcfg.pbkdf2_iter    = LOGIN_PBKDF2_ITER_DEF;
+    g_lcfg.hash_mode      = 1;
     g_lcfg.log_file[0]    = '\0';   /* 默认仅控制台；避免 /var/log 权限问题 */
 }
 
@@ -45,6 +55,76 @@ static void apply_env(void)
     if ((e = getenv("LOGIN_PORT")) && *e) g_lcfg.port = atoi(e);
     if ((e = getenv("LOGIN_USER")) && *e) snprintf(g_lcfg.user, sizeof(g_lcfg.user), "%s", e);
     if ((e = getenv("LOGIN_PASS")) && *e) snprintf(g_lcfg.pass, sizeof(g_lcfg.pass), "%s", e);
+    if ((e = getenv("LOGIN_SALT")) && *e) snprintf(g_lcfg.salt_hex, sizeof(g_lcfg.salt_hex), "%s", e);
+    if ((e = getenv("LOGIN_PWD_HASH")) && *e)
+        snprintf(g_lcfg.pwd_hash_hex, sizeof(g_lcfg.pwd_hash_hex), "%s", e);
+    if ((e = getenv("LOGIN_PBKDF2_ITER")) && *e) g_lcfg.pbkdf2_iter = (uint32_t)strtoul(e, NULL, 10);
+    if ((e = getenv("LOGIN_OTP")) && *e) snprintf(g_lcfg.otp, sizeof(g_lcfg.otp), "%s", e);
+}
+
+/*
+ * 推导运行期期望凭据：salt + expect_hash。
+ * 必须在使用 q_log 之后、监听端口之前调用（需要日志输出 salt 便于联调）。
+ */
+int login_cred_init(void)
+{
+    char   hex[LOGIN_SALT_LEN * 2u + 1u];
+    char   hhex[LOGIN_PWDHASH_LEN * 2u + 1u];
+
+    if (g_lcfg.pbkdf2_iter == 0u)
+        g_lcfg.pbkdf2_iter = LOGIN_PBKDF2_ITER_DEF;
+
+    /* ---- salt ---- */
+    if (g_lcfg.salt_hex[0])
+    {
+        if (login_hex_decode(g_lcfg.salt_hex, g_lcfg.salt, LOGIN_SALT_LEN) != (int)LOGIN_SALT_LEN)
+        {
+            fprintf(stderr, "[login] salt_hex 非法（需 %d 个 hex 字符）\n", LOGIN_SALT_LEN * 2);
+            return -1;
+        }
+    }
+    else if (q_rand_bytes(g_lcfg.salt, LOGIN_SALT_LEN) != 0)
+    {
+        fprintf(stderr, "[login] salt 随机生成失败\n");
+        return -1;
+    }
+    /* login_hex_encode 成功返回字符数、失败返回 -1：失败时降级为占位文本（不致命） */
+    if (login_hex_encode(g_lcfg.salt, LOGIN_SALT_LEN, hex, sizeof(hex)) < 0)
+        snprintf(hex, sizeof(hex), "(encode-failed)");
+
+    /* ---- 期望 pwd_hash ---- */
+    if (g_lcfg.pwd_hash_hex[0])
+    {
+        if (login_hex_decode(g_lcfg.pwd_hash_hex, g_lcfg.expect_hash, LOGIN_PWDHASH_LEN)
+            != (int)LOGIN_PWDHASH_LEN)
+        {
+            fprintf(stderr, "[login] pwd_hash_hex 非法（需 %d 个 hex 字符）\n", LOGIN_PWDHASH_LEN * 2);
+            return -1;
+        }
+        g_lcfg.hash_mode = 1;
+    }
+    else if (q_crypto_pbkdf2_sm3((const uint8_t *)g_lcfg.pass, strlen(g_lcfg.pass),
+                                 g_lcfg.salt, LOGIN_SALT_LEN,
+                                 g_lcfg.pbkdf2_iter, g_lcfg.expect_hash,
+                                 LOGIN_PWDHASH_LEN) != 0)
+    {
+        /* 国密库不可用：回退遗留明文比较（仅测试用途，明确告警） */
+        g_lcfg.hash_mode = 0;
+        QLOG_WARN(g_login.log, "PBKDF2-SM3 不可用，回退【明文口令】比较（禁止用于生产）");
+    }
+    else
+    {
+        g_lcfg.hash_mode = 1;
+    }
+
+    if (login_hex_encode(g_lcfg.expect_hash, LOGIN_PWDHASH_LEN, hhex, sizeof(hhex)) < 0)
+        snprintf(hhex, sizeof(hhex), "(encode-failed)");
+    QLOG_INFO(g_login.log, "凭据就绪: user=%s salt=%s iter=%u mode=%s expect_pwd_hash=%s",
+              g_lcfg.user, hex, (unsigned)g_lcfg.pbkdf2_iter,
+              g_lcfg.hash_mode ? "pbkdf2-sm3" : "legacy-plaintext", hhex);
+    fprintf(stderr, "[login] user=%s salt=%s iter=%u pwd_hash=%s\n",
+            g_lcfg.user, hex, (unsigned)g_lcfg.pbkdf2_iter, hhex);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -68,6 +148,14 @@ int main(int argc, char **argv)
             snprintf(g_lcfg.user, sizeof(g_lcfg.user), "%s", argv[++i]);
         else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc)
             snprintf(g_lcfg.pass, sizeof(g_lcfg.pass), "%s", argv[++i]);
+        else if (strcmp(argv[i], "-S") == 0 && i + 1 < argc)
+            snprintf(g_lcfg.salt_hex, sizeof(g_lcfg.salt_hex), "%s", argv[++i]);
+        else if (strcmp(argv[i], "-K") == 0 && i + 1 < argc)
+            snprintf(g_lcfg.pwd_hash_hex, sizeof(g_lcfg.pwd_hash_hex), "%s", argv[++i]);
+        else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc)
+            g_lcfg.pbkdf2_iter = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "-O") == 0 && i + 1 < argc)
+            snprintf(g_lcfg.otp, sizeof(g_lcfg.otp), "%s", argv[++i]);
         else
         {
             usage(argv[0]);
@@ -86,6 +174,14 @@ int main(int argc, char **argv)
         return 1;
     }
     q_log_set_console(g_login.log, g_lcfg.log_console);
+
+    /* 凭据派生必须在日志就绪后、监听前完成：客户端 SALT_QUERY 依赖此处确定的 salt */
+    if (login_cred_init() != 0)
+    {
+        fprintf(stderr, "[login] 凭据初始化失败\n");
+        q_log_close(g_login.log);
+        return 1;
+    }
 
     if (daemon_install_signal_handlers() != 0)
         QLOG_WARN(g_login.log, "信号处理器安装失败（将无法优雅退出）");

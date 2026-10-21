@@ -232,7 +232,7 @@ void fail_note(netd_ctx_t *g, const netd_addr_t *src);
 int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
                 const uint8_t *body, size_t blen,
                 const uint8_t chanid[32], const uint8_t userid[32],
-                const char *reqid,
+                const uint8_t token[32], const char *reqid,
                 uint32_t *result, uint8_t *out, size_t outcap, size_t *out_len);
 
 /* ===================== 业务处理 / 登录（netd_handler.c） ===================== */

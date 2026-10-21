@@ -7,18 +7,27 @@
  */
 #include "srv_netd.h"
 
+/** 把 RESULT 结果码编码进 out（netd 各处「回带结果码」统一走这里，避免 tag/长度漂移） */
+static void netd_put_result(uint8_t *out, size_t outcap, size_t *off, uint32_t result)
+{
+    uint8_t rb[4];
+    size_t  n = 0u;
+
+    put_be32(rb, result);
+    if (q_codec_tlv_encode(out + *off, outcap - *off, Q_IPC_T_RESULT, rb, 4, &n) == 0)
+        *off += n;
+}
+
 static int hnd_hello(uint16_t cmd, const uint8_t *body, size_t body_len,
                      uint8_t *out, size_t outcap, size_t *out_len, void *ud)
 {
-    size_t  n = 0u, off = 0u;
-    uint8_t rb[4];
+    size_t  off = 0u;
 
     (void)cmd; (void)body; (void)body_len; (void)ud;
 
-    put_be32(rb, Q_IPC_R_OK);
-    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4, &n) != 0)
-        return -1;
-    off += n;
+    /* HELLO 由 netd 本地应答（能力协商，不下发 bizd）：无需下游微服务即可连通，
+       三端客户端在握手后第一条指令即 HELLO，此处必须自洽返回 RESULT=OK。 */
+    netd_put_result(out, outcap, &off, Q_IPC_R_OK);
     *out_len = off;
     return 0;
 }
@@ -26,15 +35,12 @@ static int hnd_hello(uint16_t cmd, const uint8_t *body, size_t body_len,
 static int hnd_heartbeat(uint16_t cmd, const uint8_t *body, size_t body_len,
                          uint8_t *out, size_t outcap, size_t *out_len, void *ud)
 {
-    size_t  n = 0u, off = 0u;
-    uint8_t rb[4];
+    size_t  off = 0u;
 
     (void)cmd; (void)body; (void)body_len; (void)ud;
 
-    put_be32(rb, Q_IPC_R_OK);
-    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4, &n) != 0)
-        return -1;
-    off += n;
+    /* 心跳仅本地保活；注意：此处【不】重新签发 Token，Token TTL 到期后客户端须重新登录 */
+    netd_put_result(out, outcap, &off, Q_IPC_R_OK);
     *out_len = off;
     return 0;
 }
@@ -43,8 +49,7 @@ static int hnd_logout(uint16_t cmd, const uint8_t *body, size_t body_len,
                       uint8_t *out, size_t outcap, size_t *out_len, void *ud)
 {
     netd_udata_t *u = (netd_udata_t *)ud;
-    size_t  n = 0u, off = 0u;
-    uint8_t rb[4];
+    size_t   off = 0u;
 
     (void)cmd; (void)body; (void)body_len;
 
@@ -54,10 +59,7 @@ static int hnd_logout(uint16_t cmd, const uint8_t *body, size_t body_len,
         q_mem_zero(&u->c->token, sizeof(u->c->token));
     }
 
-    put_be32(rb, Q_IPC_R_OK);
-    if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4, &n) != 0)
-        return -1;
-    off += n;
+    netd_put_result(out, outcap, &off, Q_IPC_R_OK);
     *out_len = off;
     return 0;
 }
@@ -73,8 +75,7 @@ static int hnd_biz(uint16_t cmd, const uint8_t *body, size_t body_len,
 {
     netd_udata_t *u = (netd_udata_t *)ud;
     uint32_t result = Q_IPC_R_UNAVAILABLE;
-    size_t   n = 0u, off = 0u;
-    uint8_t  rb[4];
+    size_t   off = 0u;
     char     cid[INET6_ADDRSTRLEN + 128];
 
     if (!u || !u->g || !u->c)
@@ -83,22 +84,34 @@ static int hnd_biz(uint16_t cmd, const uint8_t *body, size_t body_len,
     QLOG_INFO(u->g->log, "转发业务请求 %s cmd=%u -> bizd",
               netd_cid(u->c, cid, sizeof(cid)), (unsigned)cmd);
 
+    /* Token 透传：bizd 只从外层 Q_IPC_T_TOKEN 取值转给下游，
+       已登录的业务请求必须带上，否则下游 token 恒为全零、鉴权形同虚设。 */
     if (ipc_forward(u->g, &u->c->src_addr, cmd, body, body_len,
-                    u->c->channel_id, u->c->token.user_id, u->c->req_id,
-                    &result, out, outcap, out_len) != 0)
+                    u->c->channel_id, u->c->token.user_id,
+                    u->c->has_token ? u->c->token.token : NULL, u->c->req_id,
+                    &result, out, outcap, &off) != 0)
     {
-        /* bizd 不可用：回带结果码的响应，避免客户端空等 */
+        /* bizd 不可达：回带结果码的响应，避免客户端空等 */
+        off = 0u;
         QLOG_WARN(u->g->log, "转发业务请求失败 %s cmd=%u",
                   netd_cid(u->c, cid, sizeof(cid)), (unsigned)cmd);
-        put_be32(rb, Q_IPC_R_UNAVAILABLE);
-        if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4, &n) == 0)
-        {
-            off += n;
-            *out_len = off;
-        }
+        netd_put_result(out, outcap, &off, Q_IPC_R_UNAVAILABLE);
+        *out_len = off;
         return 0;
     }
-    return (result == Q_IPC_R_OK) ? 0 : -1;
+
+    /*
+     * 业务层失败（如 BADCRED / UNAUTHORIZED / 下游返回非 0）**不**升级为断连：
+     * ipc_forward 已把下游 RESULT 装进 out，此处原样回给客户端即可；
+     * 若返回非 0，netd_srv 会 break 断连，客户端只能看到 -1 而拿不到真实结果码，
+     * 登录失败、Token 过期这些「可恢复」场景将全部退化成连接断开。
+     */
+    if (result != Q_IPC_R_OK)
+        QLOG_WARN(u->g->log, "业务请求 result=%u %s cmd=%u", (unsigned)result,
+                  netd_cid(u->c, cid, sizeof(cid)), (unsigned)cmd);
+
+    *out_len = off;
+    return 0;
 }
 
 /* 把本进程支持的指令注册到分发表；ud 透传给各 handler */
@@ -166,22 +179,18 @@ int do_login(netd_conn_t *c, const uint8_t *body, size_t blen,
     QLOG_INFO(c->g->log, "转发登录请求 %s -> bizd",
               netd_cid(c, cid, sizeof(cid)));
 
+    /* LOGIN 阶段尚无 Token：显式传 NULL（c->token.token 此刻还是全零） */
     if (ipc_forward(c->g, &c->src_addr, Q_CHAN_CMD_LOGIN, body, blen,
-                    c->channel_id, c->token.user_id, c->req_id,
+                    c->channel_id, c->token.user_id, NULL, c->req_id,
                     &result, out, outcap, out_len) != 0)
     {
         /* bizd 不可用：仍回带结果码的响应，避免客户端空等 */
-        size_t n = 0u, off = 0u;
-        uint8_t rb[4];
+        size_t off = 0u;
 
         QLOG_WARN(c->g->log, "转发登录请求失败 %s",
                   netd_cid(c, cid, sizeof(cid)));
-        put_be32(rb, Q_IPC_R_UNAVAILABLE);
-        if (q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_RESULT, rb, 4, &n) == 0)
-        {
-            off += n;
-            *out_len = off;
-        }
+        netd_put_result(out, outcap, &off, Q_IPC_R_UNAVAILABLE);
+        *out_len = off;
         return 0;
     }
 
@@ -201,10 +210,17 @@ int do_login(netd_conn_t *c, const uint8_t *body, size_t blen,
     }
 
     c->has_token = 1;
+    /*
+     * Token 回给客户端必须用 Q_IPC_T_AUTHTOK(0x0106)：
+     *   0x0106 = 客户端侧契约（qc_login / 业务请求携带 Token 均用此 tag，
+     *            见《客户端通信接口与开发指南》与 include_ipc_proto.h 注释）；
+     *   0x0006 = netd <-> bizd 的内部 wire tag（ipc_forward 转发用，不下发客户端）。
+     * 历史上此处误用 0x0006，导致 qc_login 取不到 Token、任何一端都登不进去。
+     */
     {
         size_t n = 0u;
         if (q_codec_tlv_encode(out + *out_len, outcap - *out_len,
-                               Q_IPC_T_TOKEN, c->token.token,
+                               Q_IPC_T_AUTHTOK, c->token.token,
                                Q_CHAN_TOKEN_LEN, &n) == 0)
             *out_len += n;
     }

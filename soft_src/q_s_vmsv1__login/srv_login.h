@@ -37,7 +37,9 @@ extern "C" {
 #include "q_net.h"
 #include "q_log.h"
 #include "q_rand.h"
+#include "q_crypto.h"         /* q_crypto_pbkdf2_sm3（口令派生） */
 #include "q_chan.h"           /* 仅取 Q_CHAN_CMD_* 指令码，避免重复定义 wire 契约 */
+#include "include_ipc_proto.h" /* Q_PBKDF2_* 派生参数（与三端客户端共用同一事实来源） */
 
 /* ===================== 默认配置 ===================== */
 #define LOGIN_PORT_DEF        9002    /* 对齐 bizd ep_auth（LOGIN/HEARTBEAT/LOGOUT） */
@@ -50,6 +52,16 @@ extern "C" {
 #define LOGIN_TOKEN_LEN       32      /* token 明文字节数；hex 后 64 字符 */
 #define LOGIN_USER_DEF        "qiaoshui"
 #define LOGIN_PASS_DEF        "123456"
+
+/*
+ * 口令派生参数（方案A：服务端按账号下发 salt，客户端本地派生 PBKDF2-SM3）。
+ * 三端客户端与登录服务【必须】使用同一组 (salt, iter) 才能得到一致的 pwd_hash，
+ * 故 iter 作为协议常量定义在此（可由 -i / LOGIN_PBKDF2_ITER 覆盖，覆盖后须同步客户端）。
+ * salt 由登录服务持有并经 SALT_QUERY(cmd=4) 下发，不硬编码。
+ */
+#define LOGIN_PBKDF2_ITER_DEF Q_PBKDF2_ITER_DEFAULT
+#define LOGIN_SALT_LEN        Q_PBKDF2_SALT_LEN    /* salt 字节数（16B -> 32 hex） */
+#define LOGIN_PWDHASH_LEN     Q_PBKDF2_OUT_LEN     /* PBKDF2-SM3 输出长度（32B -> 64 hex） */
 
 /* 响应 result 码（login 自有，语义对齐 srv_bizd.h 响应） */
 #define LOGIN_R_OK           0
@@ -68,6 +80,17 @@ typedef struct
     int       io_timeout_sec;
     char      user[64];
     char      pass[64];
+    /* —— 口令校验（方案A）——
+       salt_hex 为空时：启动时随机生成 LOGIN_SALT_LEN 字节并打印到日志；
+       pwd_hash_hex 为空时：由 PBKDF2-SM3(pass, salt, iter) 在启动时现算。
+       生产环境应把 salt_hex / pwd_hash_hex 落库（按账号），不再保存明文 pass。 */
+    char      salt_hex[LOGIN_SALT_LEN * 2u + 1u];
+    char      pwd_hash_hex[LOGIN_PWDHASH_LEN * 2u + 1u];
+    uint32_t  pbkdf2_iter;
+    uint8_t   salt[LOGIN_SALT_LEN];        /* 运行期：salt 原始字节 */
+    uint8_t   expect_hash[LOGIN_PWDHASH_LEN]; /* 运行期：期望 pwd_hash */
+    int       hash_mode;                   /* 1=PBKDF2 常量时间比较；0=遗留明文比较 */
+    char      otp[32];                     /* 期望动态口令；空=不校验 OTP */
     char      log_file[256];  /* 空 = 仅控制台 */
     int       log_level;
     int       log_console;
@@ -95,6 +118,8 @@ extern struct login_ctx  g_login;  /* 定义于 main.c */
 
 /* ===================== 配置（main.c） ===================== */
 void login_cfg_defaults(void);
+/* 依据 pass / salt_hex / pwd_hash_hex 推导运行期期望凭据；失败返回 -1 */
+int  login_cred_init(void);
 
 /* ===================== 工具（login_util.c） ===================== */
 void     login_put_be32(uint8_t *p, uint32_t v);
