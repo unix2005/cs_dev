@@ -9,6 +9,22 @@ int daemon_harden(const struct daemon_harden_cfg *cfg)
         return -1;
     }
 
+#ifdef Q_SYS_WINDOWS
+    /* Windows 无 chroot / setuid（服务降权走服务账户或完整性级别），
+       一旦调用方要求这两项即明确失败，避免“假装加固成功”。 */
+    if (cfg->chroot_dir != NULL)
+    {
+        fprintf(stderr, "[harden] 当前平台不支持 chroot（Windows）\n");
+        return -1;
+    }
+    if (cfg->drop_uid >= 0)
+    {
+        fprintf(stderr, "[harden] 当前平台不支持 setuid 降权（Windows）\n");
+        return -1;
+    }
+    (void)cfg->seccomp_profile;
+    return 0;
+#else
     if (cfg->chroot_dir != NULL)
     {
         /* TODO: 正式实现应先绑定挂载最小根文件系统再 chroot，避免信息泄露 */
@@ -38,4 +54,5 @@ int daemon_harden(const struct daemon_harden_cfg *cfg)
     (void)cfg->seccomp_profile;
 
     return 0;
+#endif /* !Q_SYS_WINDOWS */
 }

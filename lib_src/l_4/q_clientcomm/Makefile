@@ -13,18 +13,30 @@ HEADER    = qc_client.h
 OBJS      = qc_client.o
 
 # 逐级添加下层依赖（l_4 依赖 l_3 -> l_2 -> l_1）；仅供最终链接/ut 使用
-LIBS     += -lqchan -lqsec -lqcodec -lqnet -lqcrypto -lqrand -lqreactor -lqutil -lqmem -lqlog
+# 注：qc_knock 用到 l_3/q_spa，故闭包内必须含 -lqspa（缺则 Windows ld 报未决符号）
+LIBS     += -lqchan -lqspa -lqsec -lqcodec -lqnet -lqcrypto -lqrand -lqreactor -lqutil -lqmem -lqlog
+
+# ut / ut_login 共用的链接闭包（静态库全在 $(LIB)，Tongsuo 走 DEP_HOME 依赖根）
+UT_LIBS   = -L$(LIB) -lqclientcomm -lqchan -lqspa -lqsec -lqcodec -lqnet -lqcrypto \
+            -lqrand -lqreactor -lqutil -lqmem -lqlog \
+            $(LIB_PTHREAD) -L$(DEP_HOME)/tongsuo/lib64 $(LIB_CRYPTO) \
+            -Wl,-rpath,$(LIB) -Wl,-rpath,$(DEP_HOME)/tongsuo/lib64
 
 include ../../../include/Makefile.inc
 
 # —— 单元测试（链接 libqclientcomm.so + 传递闭包；验证编译/链接/TLV 回环/空路径）——
 ut: all
 	mkdir -p ut/bin
-	$(CC) $(CFLAGS) -I. ut/qc_ut.c -o ut/bin/qc_ut \
-	  -L$(LIB) -lqclientcomm -lqchan -lqsec -lqcodec -lqnet -lqcrypto \
-	  -lqrand -lqreactor -lqutil -lqmem -lqlog \
-	  $(LIB_PTHREAD) -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) \
-	  -Wl,-rpath,$(LIB) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64
+	$(CC) $(CFLAGS) -I. ut/qc_ut.c -o ut/bin/qc_ut $(UT_LIBS)
 	./ut/bin/qc_ut
 
-.PHONY: install_hdr ut
+# —— 登录闭环端到端联调（需真实运行 netd + bizd + login；不自动执行）——
+# 用法见 ut/qc_login_ut.c 头部注释；例：
+#   ./ut/bin/qc_login_ut --host 127.0.0.1 --port 18099 --user qiaoshui \
+#        --pass 123456 --pub /path/netd_sm2.pub
+ut_login: all
+	mkdir -p ut/bin
+	$(CC) $(CFLAGS) -I. ut/qc_login_ut.c -o ut/bin/qc_login_ut $(UT_LIBS)
+	@echo "已生成 ut/bin/qc_login_ut（需 netd/bizd/login 已启动，见 ut/qc_login_ut.c 头部用法）"
+
+.PHONY: install_hdr ut ut_login

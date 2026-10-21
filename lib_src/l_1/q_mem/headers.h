@@ -15,4 +15,11 @@
 
 #include "include_stdio.h"
 
+/* Windows：q_mem_zero() 使用 SecureZeroMemory（<winbase.h> 宏，映射到 RtlSecureZeroMemory）。
+   项目规则禁止 api 目录下的 .c 直接引用系统头，故按平台在聚合头内引入。
+   （仅本模块需要，不放入公共 include_stdio.h，避免 windows.h 宏污染全工程） */
+#ifdef Q_SYS_WINDOWS
+#include <windows.h>
+#endif
+
 #endif /* Q_MEM_HEADERS_H */

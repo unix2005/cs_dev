@@ -54,7 +54,7 @@ int q_reactor_timer_create(q_fd_t *tfd_out)
     s->is_threaded = 1;
 
 #elif defined(Q_SYS_WINDOWS)
-    SOCKET sk = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    SOCKET sk = Q_SOCKET(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sk == INVALID_SOCKET)
     {
         free(s);

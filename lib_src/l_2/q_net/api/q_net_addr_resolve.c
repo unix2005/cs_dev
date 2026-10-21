@@ -10,6 +10,7 @@ int q_net_addr_resolve(const char *host, int port,
 {
     if (!host || !ss || !len)
         return -1;
+    Q_WINSOCK_INIT();   /* Windows：inet_pton 依赖 Winsock 已初始化 */
     memset(ss, 0, sizeof(*ss));
 
     struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)ss;

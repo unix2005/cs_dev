@@ -31,6 +31,12 @@
 
 // 跨平台文件、IO兼容
 #ifdef Q_SYS_WINDOWS
+/* winsock2.h 必须先于 windows.h 包含：否则 windows.h 会拉入旧版 winsock.h，
+   导致 winsock2.h 告警（clang 下）甚至符号冲突。本头是工程最基础的聚合头
+   （所有模块首个包含），在此统一前置，杜绝后续 include_time.h / include_thd.h
+   先引入 windows.h 的顺序隐患。 */
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <io.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -44,7 +50,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
-
 // 通用内存、字符串工具兼容宏（全平台通用）
 #define Q_MEM_ZERO(p, s)    memset(p, 0, s)
 #define Q_STR_EMPTY(s)     ((s) == NULL || *(s) == '\0')

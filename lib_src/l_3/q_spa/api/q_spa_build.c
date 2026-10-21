@@ -6,7 +6,6 @@
 #include "q_spa.h"
 #include "q_crypto.h"
 #include "q_rand.h"
-#include <arpa/inet.h>
 
 int q_spa_build(const uint8_t *spa_key, size_t key_len, uint8_t key_id, const uint8_t user_id[Q_SPA_USERID_LEN],
                 uint16_t req_port, uint16_t req_ttl, const uint8_t ip_hint[16], q_spa_pkt_t *out)

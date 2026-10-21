@@ -54,6 +54,12 @@ SOFT_LIB  ?= .
 TONGSUO_HOME ?= $(SOFT_HOME)/tongsuo
 LIB_CRYPTO    = -lssl -lcrypto
 
+# 第三方依赖根：cjson / tongsuo 等**与平台相关**的预编译产物。
+# 三端（Windows/Linux/macOS）产物二进制格式不同（COFF/ELF/Mach-O），
+# 若都放在 $(SOFT_HOME) 下同名目录会互相覆盖；交叉编译时用命令行覆盖本变量，
+# 例如：make DEP_HOME=/path/to/deps-linux  （默认指向项目根，与历史行为一致）
+DEP_HOME ?= $(SOFT_HOME)
+
 # 视频解码（按需）
 # FFMPEG_HOME ?= $(SOFT_HOME)/open_src/ffmpeg
 # LIB_FFMPEG  = -lavformat -lavcodec -lavutil -lswscale

@@ -31,7 +31,7 @@ q_disp_t *q_disp_create(int nworkers)
 #ifdef Q_SYS_WINDOWS
     /* Windows 无 pipe()/poll()：用“自回环 UDP socket”作为唤醒通道（WSAPoll 可监听） */
     {
-        SOCKET sk = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        SOCKET sk = Q_SOCKET(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (sk == INVALID_SOCKET)
             goto fail;
         struct sockaddr_in sa;

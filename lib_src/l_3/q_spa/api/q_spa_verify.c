@@ -5,7 +5,6 @@
 #include "headers.h"
 #include "q_spa.h"
 #include "q_crypto.h"
-#include <arpa/inet.h>
 
 int q_spa_verify(const uint8_t *spa_key, size_t key_len, const q_spa_pkt_t *pkt, uint64_t now_sec,
                  uint16_t *out_req_port, uint16_t *out_req_ttl)

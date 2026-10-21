@@ -9,6 +9,12 @@
 
 #include "include_stdio.h"
 #include <errno.h>
+/* Windows：无 /dev/urandom，改用系统 CNG 随机数发生器 BCryptGenRandom
+   （系统级 CSPRNG，等价 /dev/urandom 的安全强度；需链接 -lbcrypt）。 */
+#ifdef Q_SYS_WINDOWS
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 #include "q_rand.h"
 
 #endif /* Q_RAND_HEADERS_H */

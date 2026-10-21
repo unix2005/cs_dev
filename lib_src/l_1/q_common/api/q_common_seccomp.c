@@ -18,12 +18,16 @@
    日志：本库仅依赖 libc，直接写 stderr（守护进程 stderr 通常已重定向至日志）。 */
 #include "headers.h"
 #include "q_common.h"
-#include <seccomp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+/* 仅 Linux 才有 <seccomp.h>（libseccomp）；macOS/Windows 无此头，
+   必须一并收进 Q_SYS_LINUX 分支，否则 macOS 编译在此处直接失败。 */
+#ifdef Q_SYS_LINUX
 #include <sys/socket.h>
+#include <seccomp.h>
+#endif
 
 #ifndef AF_INET
 #define AF_INET 2
@@ -37,6 +41,9 @@
 #ifndef AF_NETLINK
 #define AF_NETLINK 16
 #endif
+
+/* ===== 以下实现依赖 Linux seccomp-bpf（libseccomp），非 Linux 平台整体不编译 ===== */
+#ifdef Q_SYS_LINUX
 
 /* 允许列表维度开关 */
 #define SC_NET      (1u << 0)  /* recvfrom/recvmsg/sendto/sendmsg/recv/send */
@@ -217,3 +224,15 @@ fail:
     seccomp_release(ctx);
     return -1;
 }
+
+#else  /* 非 Linux（Windows / macOS）：无 seccomp-bpf，提供空实现桩 */
+
+int daemon_seccomp_apply(int profile)
+{
+    /* 平台不支持 seccomp-bpf；纵深防御项缺失，调用方通常忽略失败以保持可用。 */
+    (void)profile;
+    fprintf(stderr, "[seccomp] 当前平台不支持 seccomp-bpf（仅 Linux 可用），已跳过\n");
+    return -1;
+}
+
+#endif /* Q_SYS_LINUX */

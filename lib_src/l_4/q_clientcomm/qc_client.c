@@ -13,11 +13,12 @@
 #include <string.h>
 
 #include "q_chan.h"            /* q_chan_t / q_chan_create / handshake / transmit / receive / destroy */
-#include "q_net.h"             /* q_net_connect / q_net_close */
+#include "q_net.h"             /* q_net_connect / q_net_close / UDP 收发 / 地址解析 */
 #include "q_codec.h"           /* q_codec_tlv_encode / q_codec_tlv_decode */
 #include "q_crypto.h"          /* q_crypto_pbkdf2_sm3 */
 #include "q_mem.h"             /* q_mem_zero */
-#include "include_ipc_proto.h" /* Q_IPC_T_* 内层 TLV tag / Q_IPC_R_* 结果码 */
+#include "q_spa.h"             /* q_spa_build（SPA 敲门） */
+#include "include_ipc_proto.h" /* Q_IPC_T_* 内层 TLV tag / Q_IPC_R_* 结果码 / Q_PBKDF2_* */
 
 /* struct timeval（setsockopt SO_RCVTIMEO/SO_SNDTIMEO 需要）；Windows 由 winsock2.h 提供 */
 #ifndef Q_SYS_WINDOWS
@@ -50,6 +51,10 @@ static int qc_set_timeout(q_fd_t fd, int sec)
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 #endif
 }
+
+/* 业务请求体内层 TLV 拼装缓冲上限（AUTHTOK+BIZ_TYPE+BIZ_PARAM+分页）。
+   BIZ_PARAM 走文本 JSON，2048 对过滤条件/分页场景足够；超出直接报错而非静默截断。 */
+#define QC_BIZ_BODY_MAX 2048u
 
 /* 从明文 TLV 中提取 RESULT（uint32 网络序）。
    返回 >=0 找到的 RESULT 值（0=成功）；-1 未找到 RESULT（视为无错误指示）；
@@ -132,6 +137,44 @@ void qc_close(qc_session_t *s)
     s->authed = 0;
 }
 
+/*
+ * SPA 敲门：UDP 单包，无响应（fire-and-forget）。
+ * ip_hint 填 0 —— knockd 以 recvfrom 的真实源 IP 为准，防 IP 欺骗。
+ */
+int qc_knock(const char *knock_host, int knock_port,
+             const uint8_t *spa_key, size_t key_len, uint8_t key_id,
+             const uint8_t user_id[32], uint16_t req_port, uint16_t req_ttl)
+{
+    q_spa_pkt_t          pkt;
+    q_fd_t               fd = (q_fd_t)-1;
+    struct sockaddr_storage ss;
+    socklen_t            slen = 0;
+    uint8_t              ip_hint[16];
+    ssize_t              n;
+
+    if (!knock_host || !spa_key || key_len == 0u || !user_id)
+        return -1;
+
+    memset(&pkt, 0, sizeof(pkt));
+    memset(ip_hint, 0, sizeof(ip_hint));
+    if (q_spa_build(spa_key, key_len, key_id, user_id, req_port, req_ttl, ip_hint, &pkt) != 0)
+        return -1;
+
+    if (q_net_socket_udp(&fd) != 0)
+        return -1;
+    if (q_net_addr_resolve(knock_host, knock_port, &ss, &slen) != 0)
+    {
+        q_net_close(fd);
+        return -1;
+    }
+
+    n = q_net_udp_send(fd, &pkt, sizeof(pkt), (const struct sockaddr *)&ss, slen);
+    q_net_close(fd);
+
+    q_mem_zero(&pkt, sizeof(pkt));   /* 报文中含密文与 tag，用完即清 */
+    return (n == (ssize_t)sizeof(pkt)) ? 0 : -1;
+}
+
 int qc_connect(qc_session_t *s, const char *host, int port)
 {
     if (!s || !s->chan || !host)
@@ -197,6 +240,67 @@ int qc_request(qc_session_t *s, uint16_t cmd,
     if (q_chan_receive(s->chan, s->fd, resp_out, resp_cap, resp_len_out, cmd_out) != 0)
         return -1;
     return 0;
+}
+
+/*
+ * 业务查询（BIZ_QUERY）便捷封装：三端共用，杜绝各端手拼 TLV 造成的协议漂移。
+ * 请求体：AUTHTOK(32B) + BIZ_TYPE(文本) + [BIZ_PARAM(文本)] + [OFFSET/LIMIT]
+ * 响应：原样写入 resp_out（RESULT + BODY），本门面不解析 JSON。
+ */
+int qc_biz_query(qc_session_t *s, const char *biz_type, const char *param_json,
+                 uint32_t offset, uint32_t limit,
+                 uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out)
+{
+    uint8_t body[QC_BIZ_BODY_MAX];
+    size_t  blen = 0u, plen;
+    uint16_t cmd_out = 0;
+
+    if (!s || !biz_type || !biz_type[0] || !resp_out || resp_cap == 0u || !resp_len_out)
+        return -1;
+    if (!s->authed)
+        return -1;                      /* 未登录：没有可随带的 Token */
+
+    plen = param_json ? strlen(param_json) : 0u;
+    if (plen > (size_t)(QC_BIZ_BODY_MAX - 256u))
+        return -1;                      /* 参数过大：宁可报错也不静默截断 */
+
+    /* 1) 会话 Token（业务鉴权凭据；服务端校验非空且绑定本通道） */
+    if (qc_append_tlv(body, sizeof(body), &blen, Q_IPC_T_AUTHTOK,
+                      s->token, Q_CHAN_TOKEN_LEN) != 0)
+        return -1;
+
+    /* 2) 业务子类型 */
+    if (qc_append_tlv(body, sizeof(body), &blen, Q_IPC_T_BIZ_TYPE,
+                      (const uint8_t *)biz_type, (uint16_t)strlen(biz_type)) != 0)
+        return -1;
+
+    /* 3) 业务参数（可选） */
+    if (plen > 0u &&
+        qc_append_tlv(body, sizeof(body), &blen, Q_IPC_T_BIZ_PARAM,
+                      (const uint8_t *)param_json, (uint16_t)plen) != 0)
+        return -1;
+
+    /* 4) 分页（limit==0 表示不分页） */
+    if (limit > 0u)
+    {
+        uint8_t u32[4];
+
+        u32[0] = (uint8_t)(offset >> 24); u32[1] = (uint8_t)(offset >> 16);
+        u32[2] = (uint8_t)(offset >> 8);  u32[3] = (uint8_t)(offset);
+        if (qc_append_tlv(body, sizeof(body), &blen, Q_IPC_T_PAGE_OFFSET, u32, 4) != 0)
+            return -1;
+
+        u32[0] = (uint8_t)(limit >> 24); u32[1] = (uint8_t)(limit >> 16);
+        u32[2] = (uint8_t)(limit >> 8);  u32[3] = (uint8_t)(limit);
+        if (qc_append_tlv(body, sizeof(body), &blen, Q_IPC_T_PAGE_LIMIT, u32, 4) != 0)
+            return -1;
+    }
+
+    if (qc_request(s, Q_CHAN_CMD_BIZ_QUERY, body, blen,
+                   resp_out, resp_cap, resp_len_out, &cmd_out) != 0)
+        return -1;
+
+    return qc_result_to_ret(qc_extract_result(resp_out, *resp_len_out));
 }
 
 int qc_hello(qc_session_t *s)
@@ -307,8 +411,14 @@ int qc_login(qc_session_t *s, const char *username, const uint8_t pwd_hash[32],
                 result = ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) |
                          ((uint32_t)v[2] << 8) | (uint32_t)v[3];
             }
-            else if (tag == Q_IPC_T_AUTHTOK && vlen >= 32)
+            else if ((tag == Q_IPC_T_AUTHTOK || tag == Q_IPC_T_TOKEN) && vlen >= 32 && !have_tok)
             {
+                /*
+                 * 首选 Q_IPC_T_AUTHTOK(0x0106) —— 客户端侧契约（与业务请求携带 Token 的
+                 * tag 一致，见《客户端通信接口与开发指南》）。
+                 * 同时接受 Q_IPC_T_TOKEN(0x0006)：历史 netd 版本用它回 Token（那是
+                 * netd<->bizd 的 wire tag），为兼容存量服务端（三端灰度升级期间）保留。
+                 */
                 memcpy(s->token, v, 32);
                 have_tok = 1;
             }

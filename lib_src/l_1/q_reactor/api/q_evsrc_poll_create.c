@@ -17,16 +17,16 @@ static int poll_src_fd(q_evsrc_t *s)
 }
 
 /* 在循环线程内联执行各就绪 socket 的 handler（events 归一化为便携 EPOLLIN/EPOLLOUT 等） */
-static void poll_src_tick(q_evsrc_t *s, q_disp_t *d, int timeout_ms)
+static int poll_src_tick(q_evsrc_t *s, q_disp_t *d, int timeout_ms)
 {
     (void)d;
     q_evsrc_poll_t *e = (q_evsrc_poll_t *)s;
     if (e->n == 0)
-        return;
+        return 0;
 
     WSAPOLLFD *fds = (WSAPOLLFD *)malloc(e->n * sizeof(*fds));
     if (!fds)
-        return;
+        return -1;
     for (size_t i = 0; i < e->n; i++)
     {
         fds[i].fd = (SOCKET)e->ents[i]->fd;   /* 注意：Windows 下 fd 实为 SOCKET 值 */
@@ -60,6 +60,7 @@ static void poll_src_tick(q_evsrc_t *s, q_disp_t *d, int timeout_ms)
         }
     }
     free(fds);
+    return 0;
 }
 
 static void poll_src_destroy(q_evsrc_t *s)

@@ -24,6 +24,11 @@ OBJS   = api/q_xcfg_init.o api/q_xcfg_destroy.o \
          api/q_xcfg_get_bool.o api/q_xcfg_get_float.o \
          api/q_xcfg_has_key.o api/q_xcfg_dump.o
 
+# include_xml.h 会 #include "cJSON.h"（vendored 版）：头文件路径必须走 SOFT_INCL
+# （Makefile.inc 展开为 -I 加入 CFLAGS），写在 LIBS 里对编译期无效。
+# 用 DEP_HOME（三端依赖根）而非写死路径，交叉编译时 make DEP_HOME=... 覆盖即可。
+SOFT_INCL = . $(DEP_HOME)/cjson/include
+
 include ../../../include/Makefile.inc
 
 # 分层依赖：l_1 基础层，零项目内依赖（不追加 -lq*）

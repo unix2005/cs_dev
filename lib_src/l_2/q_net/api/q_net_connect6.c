@@ -9,7 +9,7 @@ int q_net_connect6(const char *host, int port, q_fd_t *fd_out)
 {
     if (!host || port <= 0 || !fd_out)
         return -1;
-    q_fd_t fd = socket(AF_INET6, SOCK_STREAM, 0);
+    q_fd_t fd = Q_SOCKET(AF_INET6, SOCK_STREAM, 0);
     if (fd == (q_fd_t)-1)
         return -1;
 

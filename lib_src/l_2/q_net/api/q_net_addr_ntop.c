@@ -10,6 +10,7 @@ const char *q_net_addr_ntop(int fam, const void *addr, uint16_t port,
 {
     char ipb[INET6_ADDRSTRLEN];
 
+    Q_WINSOCK_INIT();   /* Windows：inet_ntop 依赖 Winsock 已初始化 */
     if (!buf || buflen < INET6_ADDRSTRLEN + 8)
         return "?";
     if (addr == NULL)

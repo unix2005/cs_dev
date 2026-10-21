@@ -43,8 +43,9 @@
 #define Q_IPC_R_UNAVAILABLE   1u   /* 下游微服务不可达 / 转发失败 */
 #define Q_IPC_R_BADREQ        2u   /* 请求参数 / TLV 结构非法 */
 #define Q_IPC_R_UNAUTHORIZED  3u   /* Token 无效 / 过期 / 绑定不匹配 */
-#define Q_IPC_R_FORBIDDEN   4u   /* 权限不足 */
-#define Q_IPC_R_INTERNAL      5u   /* 内部错误 */
+#define Q_IPC_R_FORBIDDEN    4u   /* 权限不足 */
+#define Q_IPC_R_INTERNAL     5u   /* 内部错误 */
+#define Q_IPC_R_UNSUPPORTED  6u   /* 指令/子类型未实现（下游微服务回；客户端应提示"功能未开放"） */
 
 /* ===================== 内层 TLV tag（客户端 <-> netd 密文体 / netd <-> bizd body） ===================== */
 #define Q_IPC_T_USERNAME  0x0101u  /* 用户名 */
@@ -53,6 +54,34 @@
 #define Q_IPC_T_DEVID     0x0104u  /* 设备标识 */
 #define Q_IPC_T_CVER      0x0105u  /* 客户端版本 */
 #define Q_IPC_T_AUTHTOK   0x0106u  /* 会话 Token（业务请求随带回） */
+
+/* ===================== 业务参数段（客户端 <-> netd 密文体，随业务请求携带） =====================
+ * 背景：bizd 的 body_to_params() 对未知 tag 只能退化成 "tag_%04x" 的 hex 字段，
+ *       下游能解但可读性差且易漂移，故在此统一定义（三端客户端 / bizd / 微服务共用）。
+ *
+ * 承载类型（**必须**严格遵守，否则 bizd 解出来的值语义就错了）：
+ *   Q_IPC_T_BIZ_TYPE   : UTF-8 文本（如 "stats" / "companies" / "vehicles"），无内嵌 NUL
+ *   Q_IPC_T_BIZ_PARAM  : UTF-8 文本（推荐 JSON 对象，如 {"company_id":123}），无内嵌 NUL
+ *   Q_IPC_T_PAGE_OFFSET: uint32 大端
+ *   Q_IPC_T_PAGE_LIMIT : uint32 大端
+ *
+ * 请求体固定形状（业务指令）：
+ *   0x0106 AUTHTOK(32B) + 0x0201 BIZ_TYPE + [0x0202 BIZ_PARAM] + [0x0203 OFFSET] + [0x0204 LIMIT]
+ *
+ * 注：0x0101~0x0106 这些"凭据类"字段在 bizd 侧仍按 hex 字符串传给下游（登录服务已按 hex 解码），
+ *     本段的新 tag 按上表语义传（文本原样 / 数值），**不要**改成 hex —— 一端改即协议漂移。 */
+#define Q_IPC_T_BIZ_TYPE    0x0201u  /* 业务子类型（文本） */
+#define Q_IPC_T_BIZ_PARAM   0x0202u  /* 业务参数（文本，推荐 JSON） */
+#define Q_IPC_T_PAGE_OFFSET 0x0203u  /* 分页偏移（uint32 BE） */
+#define Q_IPC_T_PAGE_LIMIT  0x0204u  /* 每页条数（uint32 BE） */
+
+/* ===================== 口令派生参数（方案A：服务端下发 salt，客户端本地派生） =====================
+ * 客户端（Windows/Linux/macOS 三端）与登录服务【必须】使用同一组 (salt, iter)：
+ * salt 由登录服务持有、经 SALT_QUERY(cmd=4) 下发；iter 作为协议常量定义在此，
+ * 一端改动即协议漂移，故严禁各自硬编码。 */
+#define Q_PBKDF2_ITER_DEFAULT  100000u  /* PBKDF2-HMAC-SM3 迭代次数（等保/护网：>=100000） */
+#define Q_PBKDF2_SALT_LEN      16u      /* salt 字节数（16B -> 32 hex） */
+#define Q_PBKDF2_OUT_LEN       32u      /* pwd_hash 字节数（SM3 输出长度，32B -> 64 hex） */
 
 /* ===================== bizd -> 微服务 JSON 包格式 =====================
  *

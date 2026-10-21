@@ -9,7 +9,7 @@ int q_net_bind(int port, q_fd_t *fd_out)
 {
     if (port <= 0 || !fd_out)
         return -1;
-    q_fd_t fd = socket(AF_INET, SOCK_DGRAM, 0);
+    q_fd_t fd = Q_SOCKET(AF_INET, SOCK_DGRAM, 0);
     if (fd == (q_fd_t)-1)
         return -1;
 
