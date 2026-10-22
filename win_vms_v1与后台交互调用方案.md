@@ -158,9 +158,9 @@ libqrand.a libqmem.a libqutil.a libqlog.a libqreactor.a libqspa.a
 ## 7. 落地里程碑建议
 
 1. ✅ **M1 打通登录闭环**（已完成，2026-10-21）：修 §5 的 1/2/3/4 → `qc_knock` 补进 l_4 门面 → 新增三端联调程序 `qc_login_ut` → `vms_core.dll` 新增 `vms_login/logout/heartbeat`。验收见 §7.1。
-2. **M2 打通一条业务查询**：定 §2.3 的业务 tag 段 → 写 biz 桩服务（9003）→ `vms_get_stats` 走通 `qc_request` + cJSON 解析 → C# 状态栏显示真实数据。
-3. **M3 铺开业务面**：`companies` / `vehicles`（分页 + 过滤 + 组织树）→ 替换 Mock 数据源。
-4. **M4 会话治理**：心跳线程（60s）+ 结果码 3 自动重登 + 串行化 gate + 断线重连退避。
+2. ✅ **M2 打通一条业务查询**（已完成，2026-10-21）：定 §2.3 的业务 tag 段 → 写 biz 桩服务（9003）→ `vms_get_stats` 走通 `qc_request` + cJSON 解析 → C# 状态栏显示真实数据。验收见 §7.2。
+3. ✅ **M3 铺开业务面**（已完成，2026-10-22）：`companies` / `vehicles`（分页 + 组织子树过滤 + 关键字 + 主键过滤）按 `sql/vms30.sql` 两表结构返回，data 域用列名的 camelCase；ABI 升至 v4 承载字符串主键 → 替换 Mock 数据源。接口见《biz微服务接口约定.md》，验收见 §7.3。
+4. **M4 会话治理**：心跳线程（60s）+ 结果码 3 自动重登 + 串行化 gate + 断线重连退避；并把环境变量自动登录换成正式登录对话框。
 5. **M5 实时**：`vms_subscribe` 改为 native 轮询线程（2~5s），保留现有回调与 UI 线程切换。
 6. **M6 视频**：`VIDEO_OPEN(0x0030)`，按技术方案走独立连接，另立子任务。
 
@@ -270,6 +270,77 @@ set VMS_HOST=127.0.0.1 & set VMS_PORT=18099 & set VMS_USER=qiaoshui
 - biz 桩服务的 Token 校验只做"非空且非全零"；真实部署要查会话存储并校验 `(token, channel_id, user_id, src_ip)` 四元绑定。
 - macOS 仍无 darwin 工具链，只做编译性保证（本次改动无平台专属分支）。
 - C# 自动登录走环境变量只是**联调通道**，生产必须换登录框 + 凭据管理器（M3/M4）。
+
+---
+
+### 7.3 M3 验收记录（2026-10-22，Windows + Linux 双端实跑）
+
+**目标**：铺开业务面 —— `vms_get_companies` / `vms_query_vehicles` 从「本地 Mock」换成
+「后台按 `sql/vms30.sql` 两张表结构返回的真实数据」。
+
+**接口事实来源**：《biz微服务接口约定.md》（请求/响应信封、字段与库表列对照、分页与过滤规则）。
+data 域字段一律是**库表列名的 camelCase**（`vehicle_id` → `vehicleId`，`note` → `note`）。
+
+**改了什么**
+
+| 位置 | 改动 |
+|---|---|
+| `soft_src/q_s_vmsv1__biz/biz_stub.c`（**新增**） | 桩数据生成：`d_org_info` 25 个组织 + `d_vehicleinfo` 34554 台车。**确定性**（行内容只由行号决定）→ 翻页不重不漏；只生成 `[offset, offset+limit)` 这一段，`total` 恒回过滤后的总行数 |
+| `soft_src/q_s_vmsv1__biz/biz_handler.c` | 新增 `handle_companies` / `handle_vehicles`：`biz_param`（JSON 文本）二次解析 → 组织子树/关键字/在线/报警/主键过滤 → 统一列表信封 `{total, offset, limit, items}` |
+| `soft_src/q_s_vmsv1__biz/srv_biz.h` + `main.c` | `biz_veh_filter_t`；`--vtotal/--vonline/--page-max`；单页上限 **100**（一条车辆 JSON 约 480B，再大就撞上 `Q_IPC_TLV_MAX=60000`，响应被 bizd 截断成非法 JSON） |
+| `win_vms_v1/native/include/vms_api.h` | **ABI 升至 v4**：`vms_company` 追加 `org_id`、`vms_vehicle` 追加 `vehicle_id` + `org_id`。原因：`org_id` CHAR(36) / `vehicle_id` CHAR(32) 是**字符串主键**，uint32 装不下（真实系统可能是 UUID 或"车牌+颜色"） |
+| `win_vms_v1/native/src/vms_core.c` | 新增 `vms_fetch_companies()` / `vms_fetch_vehicles()`：JSON → 结构体搬运；`company_id`(uint32) → `org_id`(字符串) 的翻译查本机组织树缓存；`VMS_MAX_COMPANY` 64 → 512 |
+| C# 侧 | `NativeCompany.OrgId` / `NativeVehicle.VehicleId+OrgId`；`CompanyRecord.OrgId`、`VehicleRow.VehicleId/OrgId`；`ExpectedAbiVersion=4`；`dotnet build` 0 警告 0 错误 |
+| `shell/biz_probe.py`（**新增**） | 裸协议探针：绕过 netd/bizd 直连 9003，`--selftest` 校验 total 期望值与分页连续性 |
+| `shell/e2e_m3.sh`（**新增**） | 全链路脚本：起 4 个服务 → 跑 stats/companies/vehicles 全部用例 → 收尾 |
+| `shell/vmscore_smoke.py`（**新增**） | Windows 侧 ctypes 直连 `vms_core.dll`：校验 ABI v4 结构体尺寸 + 打印组织树与车辆行 |
+| `ut/qc_login_ut.c` | 新增 `--offset/--limit`；响应缓冲 8KB → 64KB（列表 JSON 可达几十 KB） |
+
+**实测结果**
+
+```
+[biz 自检]  companies 全量 25 / parent=1 直属 18 / parent=14 子树 3            ALL OK
+            vehicles 全量 34554 / org=14 子树 398 / org=11 子树 470
+            / org=14 非递归 0 / online_only 10846 / ids 精确过滤 2
+            分页连续性 page0=[000001..000005] page1=[000006..000010] 无重叠   ALL OK
+[全链路 ]  qc_login_ut: stats / companies / vehicles 共 7 个用例            ALL PASS
+[Windows]  vms_core.dll: ABI=4  struct: company 128B / vehicle 312B / query 1120B（与 DLL 一致）
+           vms_get_companies -> 25 个组织（id=1 orgId=1 运输公司 8960/18714 下级=18 …）
+           vms_query_vehicles(全部) -> 命中 34554，本页 vehicleId=000001 京Z38406 orgId=2 …
+           vms_query_vehicles(org=14) -> 命中 398，本页 vehicleId=008723 orgId=1401 …  → OK
+```
+
+**三条关键证据**
+
+1. **组织子树计数自洽**：`org=14` 返回 398 台 = 1401(210) + 1402(188)；`recursive=0` 返回 0 台 ——
+   证明"车辆挂在叶子单位、按组织过滤 = 含所有下级"这条产品语义在服务端落地了。
+2. **字符串主键真的搬到了结构体**：Windows 侧 `vehicleId=008723 / orgId=1401` 与服务端 JSON 完全一致，
+   说明 ABI v4 新增字段与 cJSON 映射都正确（字段顺序写错这里会立刻乱码/崩溃）。
+3. **分页不重不漏**：`page0=[000001..000005]`、`page1=[000006..000010]` 无交集且严格递增 ——
+   确定性生成保证了 UI 增量加载不会重复/丢行。
+
+**复现命令**
+
+```bash
+# 服务端裸测（最快：不启 netd/bizd）
+bin/q_service_biz --no-token -p 9003 &
+python3 shell/biz_probe.py --selftest
+python3 shell/biz_probe.py --type vehicles --param '{"org_id":"14","recursive":1}' --limit 3
+
+# 全链路
+bash shell/e2e_m3.sh                       # Linux/WSL：起 4 个服务 + 跑全部用例
+bash shell/e2e_m3.sh ONLY=vehicles BIZ_PARAM='{"org_id":"14"}' LIMIT=5
+
+# Windows 侧（需服务已在跑；公钥要放到 Windows 可访问的路径）
+python shell/vmscore_smoke.py --pub E:\win_e\cs_dev\tmp_e2e\netd_sm2.pub --limit 5
+```
+
+**已知未覆盖 / 下一步**
+- **Ids 过滤仍走 uint32**：`vms_query.ids[]` 按 `"%06u"` 还原成桩主键；真实系统 `vehicle_id` 非数字时
+  应改传字符串数组（ABI v5 待办）。`company_id` → `org_id` 的翻译依赖本机组织树缓存，未加载时会先拉一次。
+- 桩服务**不校验** `org_id` 是否真实存在（未知 org 返回 0 行，不报错）。
+- biz 桩未做聚合校验：`vehicleCount` 取截图值（18714 等），与车辆实际归属数（9392）不严格相等 —— 换真实 SQL 时应统一。
+- C# 仍是环境变量自动登录通道；M4 应换正式登录对话框 + 凭据管理，并接 M4 的心跳/重连状态机。
 
 ---
 
