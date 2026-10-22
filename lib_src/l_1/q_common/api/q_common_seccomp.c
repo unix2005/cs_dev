@@ -107,6 +107,18 @@ static int add_profile_allow(scmp_filter_ctx ctx, unsigned flags)
         if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(accept), 0)  < 0) return -1;
         if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(accept4), 0) < 0) return -1;
     }
+    if (flags & SC_NETLINK) {
+        /* libnftables(libmnl) 发出 netlink 请求后，用 pselect6() 等待内核应答。
+           不放行就会被默认动作拦成 EPERM，libnftables 随即打印
+           "Could not process rule: Operation not permitted" 并返回非 0 ——
+           但**写请求已经生效**，于是 knockd 出现自相矛盾的日志：
+             AUDIT 记 action=open_ok（授权成功）
+             [ERROR] nft 开门失败（nft_run_cmd_from_buffer 返回非 0）
+           门其实是开了的。运维照 ERROR 判断会得出与事实相反的结论，
+           比"门没开"更糟：误以为 SPA 整体失效而反复排查错误的方向。
+           实测（nftables 1.0.9 + strace）唯一被拦的就是 pselect6。 */
+        if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(pselect6), 0) < 0) return -1;
+    }
     return 0;
 }
 
