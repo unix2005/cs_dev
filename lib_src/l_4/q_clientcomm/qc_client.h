@@ -149,6 +149,128 @@ int qc_pbkdf2_sm3(const uint8_t *pass, size_t plen,
                   const uint8_t *salt, size_t slen,
                   uint32_t iter, uint8_t out[32]);
 
+/* ===================== M4：会话治理（keeper） =====================
+ * 背景：协议是严格 lockstep（一问一答），后台 Token 有 TTL(1800s) 且心跳**不续期**，
+ *       客户端未来会有多个业务线程（列表 / 定位 / 视频）。把心跳、断线重连、
+ *       Token 失效重登、请求串行化收敛在通信内核，三端共用一份，避免各端各写一套
+ *       导致"偶发卡死 / 偶发结果码 3 / 偶发解包错位"这类最难排查的问题。
+ *
+ * 线程模型：**一会话一 gate**。
+ *   - keeper 线程按 hb_interval 发心跳；失败退避重连；心跳或业务返回 3 时重新登录。
+ *   - 业务线程在调用 qc_request / qc_biz_query **前** qc_keeper_lock()，
+ *     返回后 qc_keeper_unlock()。心跳与业务因此互斥，lockstep 不被破坏。
+ *   - 未来「一个线程一条长连接」的模型（定位 / 视频各一条）天然成立：
+ *     每条连接各自 qc_session_create + qc_keeper_start，互不干涉。
+ *
+ * 口令红线：keeper **不保存口令，也不保存派生值**。重登需要的 pwd_hash
+ *           通过 cfg.on_relogin 向 UI 索取（UI 可缓存、可弹窗、可读系统凭据管理器）。
+ * 完整说明见模块内部头 qc_keeper.h。
+ */
+typedef enum qc_state {
+    QC_STATE_IDLE         = 0,  /* 未登录 / keeper 未启动 */
+    QC_STATE_ONLINE       = 1,  /* 已认证，心跳正常 */
+    QC_STATE_RECONNECTING = 2,  /* 连接不可用，退避重连中 */
+    QC_STATE_REAUTHING    = 3,  /* 连接仍在，Token 失效，重新登录中 */
+    QC_STATE_OFFLINE      = 4   /* 连续失败超上限，需 UI 介入 */
+} qc_state_t;
+
+/* 重登凭据回调：UI 侧派生 pwd_hash 填入。返回 0 = 可继续；非 0 = 无法提供（转 OFFLINE） */
+typedef int (*qc_relogin_cb)(void *ud, const uint8_t *salt, size_t salt_len,
+                             uint32_t iter, uint8_t pwd_hash_out[32]);
+/* 状态变化回调：**由 keeper 线程调用**，实现方必须编组回自己的 UI 线程 */
+typedef void (*qc_state_cb)(void *ud, int state, int rc, const char *msg);
+
+/* 重连材料（不含口令）：登录成功后由调用方填入 */
+typedef struct qc_reconnect {
+    char     host[64];
+    uint16_t port;
+    uint16_t reserved;
+    char     user[64];
+    char     knock[64];          /* 空 = 不敲门 */
+    uint8_t  spa_key[32];
+    size_t   spa_key_len;
+    uint8_t  spa_key_id;
+    uint8_t  devid[32];
+    size_t   devid_len;
+    char     cver[32];
+    uint32_t pbkdf2_iter;        /* 0 = 用协议默认 */
+} qc_reconnect_t;
+
+typedef struct qc_keeper_cfg {
+    uint32_t hb_interval_sec;    /* 0 = 默认 60 */
+    uint32_t backoff_base_sec;   /* 0 = 默认 1 */
+    uint32_t backoff_max_sec;    /* 0 = 默认 30 */
+    uint32_t max_retry;          /* 连续失败多少次转 OFFLINE；0 = 无限 */
+    uint32_t tick_ms;            /* 主循环轮询间隔；0 = 默认 500 */
+    uint32_t fault;              /* 故障注入（QC_FAULT_*），生产恒为 0 */
+    qc_relogin_cb on_relogin;    /* 必需 */
+    void         *relogin_ud;
+    qc_state_cb   on_state;      /* 可为 NULL */
+    void         *state_ud;
+} qc_keeper_cfg_t;
+
+typedef struct qc_keeper_stat {
+    int32_t  state;
+    uint32_t attempts;        /* 当前连续失败次数 */
+    uint32_t hb_sent;
+    uint32_t hb_failed;
+    uint32_t reconnects;      /* 重建连接成功次数 */
+    uint32_t relogins;        /* 自动重登成功次数 */
+    uint32_t reserved;
+    uint64_t last_ok_ms;      /* 最近一次成功（单调毫秒） */
+    uint64_t next_hb_ms;
+    uint64_t next_retry_ms;
+    char     detail[96];
+} qc_keeper_stat_t;
+
+/* 故障注入掩码（仅供联调 / UT） */
+#define QC_FAULT_NONE         0x0000u
+#define QC_FAULT_HB_FAIL      0x0001u  /* 心跳视为断连 */
+#define QC_FAULT_HB_RC3       0x0002u  /* 心跳返回结果码 3（Token 过期） */
+#define QC_FAULT_RELOGIN_FAIL 0x0004u  /* 重登必定失败 */
+
+/**
+ * 启动会话治理线程。必须在 qc_login 成功**之后**调用（未登录时心跳无意义）。
+ *   cfg 可为 NULL：取默认（60s 心跳 / 1s 起 30s 封顶退避 / 无限重连），
+ *   但 on_relogin 为 NULL 时只能重连、不能自动重登（Token 过期会转 OFFLINE）。
+ * 返回 0 已启动；-1 参数非法 / 未登录；-2 线程创建失败（退化为无治理，门面仍可用）。
+ */
+int qc_keeper_start(qc_session_t *s, const qc_keeper_cfg_t *cfg);
+
+/** 停止治理线程并等待其退出（幂等）。不会关闭连接（连接由 qc_close / destroy 负责）。 */
+void qc_keeper_stop(qc_session_t *s);
+
+/** 取会话状态与统计。out 可为 NULL（仅探测返回值）。返回 0；-1 参数非法。 */
+int qc_keeper_state(qc_session_t *s, qc_keeper_stat_t *out);
+
+/**
+ * 串行化 gate：业务线程在 qc_request / qc_biz_query 前后成对调用。
+ * keeper 心跳也走同一把锁，故心跳与业务严格互斥 —— lockstep 协议不被并发破坏。
+ * 注意：**不要**在持锁期间做重活（UI 渲染 / 大批量解析），否则心跳会被拖到超时。
+ * 返回 0；-1 参数非法。
+ */
+int qc_keeper_lock(qc_session_t *s);
+int qc_keeper_unlock(qc_session_t *s);
+
+/**
+ * 把一次业务请求的结果告诉 keeper：结果码 3（Q_IPC_R_UNAUTHORIZED）时立即触发重新登录。
+ * 返回 0 = 无需处理；>0 = 已重登且返回重登的结果码；<0 = 重登失败（连接已废，
+ * 调用方应把本次请求视为失败，由 keeper 重连后重试）。
+ */
+int qc_keeper_note_result(qc_session_t *s, int rc);
+
+/** 唤醒 keeper 线程立即动作（立即心跳 / 立即重连）。返回 0；-1 参数非法或 keeper 未运行。 */
+int qc_keeper_wake(qc_session_t *s);
+
+/** 故障注入（联调 / UT 用）。生产恒传 QC_FAULT_NONE。 */
+void qc_keeper_set_fault(qc_session_t *s, uint32_t mask);
+
+/**
+ * 填入重连材料（不含口令）：登录成功后调用一次，keeper 断线重建时用它重新敲门 + 连接 + 登录。
+ * 返回 0；-1 参数非法。
+ */
+int qc_set_reconnect_info(qc_session_t *s, const qc_reconnect_t *info);
+
 #ifdef __cplusplus
 }
 #endif

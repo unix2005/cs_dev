@@ -61,7 +61,17 @@ typedef struct
     int         no_biz;       /* 1=跳过业务查询（只验登录） */
     int         keep;         /* 1=登录后不断开（供手工观察），跳过 logout */
     int         verbose;
+    /* —— M4：会话治理 —— */
+    int         keeper;       /* 1=跑会话治理自检（心跳/重连/重登/并发 gate） */
+    uint32_t    hb_interval;  /* 心跳间隔（秒）；测试默认 2，生产 60 */
+    uint32_t    keeper_sec;   /* 每个观察窗口的秒数 */
+    uint32_t    max_retry;    /* 连续失败转 OFFLINE 的阈值；0=无限 */
+    int         concurrent;   /* 并发业务线程数（验证 gate 串行化）；0=不做 */
+    int         case_sel;     /* 只跑第 N 个治理用例（0=全部）。联调环境对单条命令时长敏感时用它拆开跑 */
 } args_t;
+
+/* 用例过滤：CASE(n) 为真才执行第 n 个用例 */
+#define CASE(n)  ((a.case_sel) == 0 || (a.case_sel) == (n))
 
 static void usage(const char *argv0)
 {
@@ -79,6 +89,11 @@ static void usage(const char *argv0)
     "  --biz-param 业务参数（UTF-8 JSON 文本），随 BIZ_QUERY 下发\n"
     "  --offset/--limit  分页（M3：companies / vehicles 列表类业务）；limit 默认由服务端取\n"
     "  --no-biz    跳过业务查询，只验登录闭环\n"
+        "  --keeper    跑 M4 会话治理自检（心跳 / 退避重连 / Token 失效重登 / 并发 gate）\n"
+        "  --hb-interval <秒>  心跳间隔（默认 2；生产用 60）\n"
+        "  --keeper-sec <秒>   每个观察窗口时长（默认 6）\n"
+        "  --max-retry <n>     连续失败 n 次转 OFFLINE；0=无限重连\n"
+        "  --concurrent <n>    并发业务线程数（默认 4；0=跳过并发用例）\n"
         "  --keep    登录成功后保持连接不登出（用于观察服务端日志）\n",
         argv0, (unsigned)Q_PBKDF2_ITER_DEFAULT);
 }
@@ -193,6 +208,10 @@ static int parse_args(int argc, char **argv, args_t *a)
     a->devid_hex = "51565f55545f30303031";   /* "QV_UT_0001" */
     a->reqttl  = 300;
     a->biz_type = "stats";
+    /* M4：会话治理参数（自检默认短间隔，便于快速观察） */
+    a->hb_interval = 2u;
+    a->keeper_sec  = 6u;
+    a->concurrent  = 4;
 
     for (i = 1; i < argc; i++)
     {
@@ -221,6 +240,12 @@ static int parse_args(int argc, char **argv, args_t *a)
         else if (!strcmp(k, "--offset"))    a->biz_offset = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(k, "--limit"))     a->biz_limit  = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(k, "--no-biz"))    a->no_biz    = 1;
+        else if (!strcmp(k, "--keeper"))    a->keeper    = 1;
+        else if (!strcmp(k, "--hb-interval")) a->hb_interval = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(k, "--keeper-sec"))  a->keeper_sec  = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(k, "--max-retry"))   a->max_retry   = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(k, "--concurrent"))  a->concurrent  = atoi(argv[++i]);
+        else if (!strcmp(k, "--case"))        a->case_sel    = atoi(argv[++i]);
         else if (!strcmp(k, "--keep"))    a->keep    = 1;
         else if (!strcmp(k, "--v"))       a->verbose = 1;
         else
@@ -238,6 +263,124 @@ static int parse_args(int argc, char **argv, args_t *a)
     if (a->reqport == 0)
         a->reqport = a->port;
     return 0;
+}
+
+/* ==================== M4：会话治理自检（心跳/重连/重登/并发 gate） ==================== */
+
+/* 跨平台最小线程封装（UT 用；生产由 UI 层各自的线程模型提供） */
+#ifdef Q_SYS_WINDOWS
+#include <windows.h>
+typedef HANDLE ut_tid_t;
+#define UT_THR_BODY(fn)   DWORD WINAPI fn(LPVOID p)
+#define UT_THR_RET_VAL    0
+static int  ut_thread_start(ut_tid_t *t, DWORD (WINAPI *fn)(LPVOID), void *arg)
+{
+    HANDLE h = CreateThread(NULL, 0, fn, arg, 0, NULL);
+    if (h == NULL) return -1;
+    *t = h;
+    return 0;
+}
+static void ut_thread_join(ut_tid_t t) { WaitForSingleObject(t, INFINITE); CloseHandle(t); }
+static void ut_sleep_ms(unsigned ms)   { Sleep((DWORD)ms); }
+#else
+#include <pthread.h>
+#include <unistd.h>
+typedef pthread_t ut_tid_t;
+#define UT_THR_BODY(fn)   void *fn(void *p)
+#define UT_THR_RET_VAL    NULL
+static int  ut_thread_start(ut_tid_t *t, void *(*fn)(void *), void *arg)
+{
+    return pthread_create(t, NULL, fn, arg) == 0 ? 0 : -1;
+}
+static void ut_thread_join(ut_tid_t t) { pthread_join(t, NULL); }
+static void ut_sleep_ms(unsigned ms)   { usleep((useconds_t)ms * 1000u); }
+#endif
+
+static const char *state_name(int s)
+{
+    switch (s)
+    {
+    case QC_STATE_ONLINE:       return "ONLINE";
+    case QC_STATE_RECONNECTING: return "RECONNECTING";
+    case QC_STATE_REAUTHING:    return "REAUTHING(重登)";
+    case QC_STATE_OFFLINE:      return "OFFLINE";
+    default:                    return "IDLE";
+    }
+}
+
+/* 重登凭据回调：UI 侧职责的模拟 —— 用口令 + 服务端新 salt **现派生** pwd_hash。
+   内核里没有口令，这正是"口令不落内核"的落点：回调返回非 0 即表示无法提供。 */
+typedef struct
+{
+    const char *pass;      /* NULL = 模拟"口令不可用"，回调返回失败 */
+    uint32_t    iter;
+    int         calls;
+} relogin_ctx_t;
+
+static int ut_relogin(void *ud, const uint8_t *salt, size_t salt_len,
+                      uint32_t iter, uint8_t out[32])
+{
+    relogin_ctx_t *c = (relogin_ctx_t *)ud;
+
+    c->calls++;
+    if (!c->pass)
+        return -1;
+    return qc_pbkdf2_sm3((const uint8_t *)c->pass, strlen(c->pass), salt, salt_len,
+                         iter ? iter : c->iter, out);
+}
+
+/* 状态回调：跑在 keeper 线程上，这里只打印（生产实现必须编组回 UI 线程） */
+static void ut_state(void *ud, int state, int rc, const char *msg)
+{
+    (void)ud;
+    printf("        [状态] %-16s rc=%-3d %s\n", state_name(state), rc, msg ? msg : "");
+}
+
+static void dump_stat(qc_session_t *s, const char *tag)
+{
+    qc_keeper_stat_t st;
+
+    if (qc_keeper_state(s, &st) != 0)
+        return;
+    printf("        [%s] state=%-16s attempts=%u  心跳=%u(失败%u)  重连=%u 重登=%u\n",
+           tag, state_name(st.state), st.attempts, st.hb_sent, st.hb_failed,
+           st.reconnects, st.relogins);
+}
+
+/* 并发业务线程：每轮都走 gate，验证 lockstep 不被并发破坏 */
+typedef struct
+{
+    qc_session_t *s;
+    const char   *biz_type;
+    int           rounds;
+    int           rc;
+} thr_arg_t;
+
+/* 前置原型（宏展开后的定义在下方，-Wmissing-prototypes 需要它） */
+#ifdef Q_SYS_WINDOWS
+static DWORD WINAPI ut_worker(LPVOID p);
+#else
+static void *ut_worker(void *p);
+#endif
+
+UT_THR_BODY(ut_worker)
+{
+    thr_arg_t *ta = (thr_arg_t *)p;
+    int        i;
+
+    for (i = 0; i < ta->rounds; i++)
+    {
+        uint8_t resp[8192];
+        size_t  rlen = 0u;
+        int     rc;
+
+        qc_keeper_lock(ta->s);
+        rc = qc_biz_query(ta->s, ta->biz_type, NULL, 0u, 0u, resp, sizeof(resp), &rlen);
+        qc_keeper_unlock(ta->s);
+        if (rc != 0)
+            ta->rc = rc;
+    }
+    return UT_THR_RET_VAL;
 }
 
 /* "ip:port" -> 拆成 host 缓冲与端口 */
@@ -511,6 +654,182 @@ int main(int argc, char **argv)
     else
     {
         printf("  [--] --no-biz：跳过业务查询\n");
+    }
+
+    /* 9.9 M4：会话治理自检（心跳 / 退避重连 / Token 失效重登 / 并发 gate） */
+    if (a.keeper)
+    {
+        qc_reconnect_t   ri;
+        qc_keeper_cfg_t  kc;
+        relogin_ctx_t    rctx;
+        qc_keeper_stat_t st;
+
+        memset(&ri, 0, sizeof(ri));
+        snprintf(ri.host, sizeof(ri.host), "%s", a.host);
+        ri.port = (uint16_t)a.port;
+        snprintf(ri.user, sizeof(ri.user), "%s", a.user);
+        if (a.knock)
+        {
+            snprintf(ri.knock, sizeof(ri.knock), "%s", a.knock);
+            if (a.spakey)
+            {
+                size_t   klen = 0u;
+                uint8_t *kb   = read_file(a.spakey, &klen);
+                if (kb && klen > 0u && klen <= sizeof(ri.spa_key))
+                {
+                    memcpy(ri.spa_key, kb, klen);
+                    ri.spa_key_len = klen;
+                }
+                free(kb);
+            }
+        }
+        if (devid_len > 0u && devid_len <= sizeof(ri.devid))
+        {
+            memcpy(ri.devid, devid, devid_len);
+            ri.devid_len = devid_len;
+        }
+        snprintf(ri.cver, sizeof(ri.cver), "%s", a.cver);
+        ri.pbkdf2_iter = a.iter;
+        step(qc_set_reconnect_info(s, &ri) == 0,
+             "qc_set_reconnect_info（重连材料：地址/账号/敲门参数，**不含口令**）");
+        memset(&ri, 0, sizeof(ri));
+
+        rctx.pass  = a.pass;
+        rctx.iter  = a.iter;
+        rctx.calls = 0;
+
+        memset(&kc, 0, sizeof(kc));
+        kc.hb_interval_sec  = a.hb_interval;
+        kc.backoff_base_sec = 1u;
+        kc.backoff_max_sec  = 8u;
+        kc.max_retry        = a.max_retry;
+        kc.tick_ms          = 200u;
+        kc.on_relogin       = ut_relogin;
+        kc.relogin_ud       = &rctx;
+        kc.on_state         = ut_state;
+        kc.state_ud         = NULL;
+        {
+            int krc = qc_keeper_start(s, &kc);
+            step(krc == 0,
+                 "qc_keeper_start rc=%d（心跳 %us，退避 1s 起 8s 封顶，max_retry=%u）",
+                 krc, (unsigned)a.hb_interval, (unsigned)a.max_retry);
+        }
+
+        if (CASE(1)) {
+        printf("\n  -- 用例1：正常心跳 --\n");
+        dump_stat(s, "启动后立即");
+        ut_sleep_ms(a.keeper_sec * 1000u);
+        qc_keeper_state(s, &st);
+        dump_stat(s, "观察窗口结束");
+        step(st.hb_sent >= 1u && st.hb_failed == 0u && st.state == QC_STATE_ONLINE,
+             "心跳持续成功 sent=%u failed=%u state=%s",
+             st.hb_sent, st.hb_failed, state_name(st.state));
+        }
+
+        if (CASE(2)) {
+        printf("\n  -- 用例2：Token 失效（心跳回 3）→ 自动重新登录 --\n");
+        qc_keeper_set_fault(s, QC_FAULT_HB_RC3);
+        ut_sleep_ms((a.hb_interval + 3u) * 1000u);
+        qc_keeper_state(s, &st);
+        dump_stat(s, "观察窗口结束");
+        step(st.relogins >= 1u,
+             "Token 失效后自动重登成功 relogins=%u（失败心跳=%u）",
+             st.relogins, st.hb_failed);
+        step(rctx.calls >= 1,
+             "重登经 UI 回调现派生 pwd_hash（内核不存口令）calls=%d", rctx.calls);
+        /* 注入常开时状态本来就在 ONLINE <-> REAUTHING 之间摆动（每次心跳都回 3），
+           所以要确认"能回到稳定在线"，必须先关掉注入再看。 */
+        qc_keeper_set_fault(s, QC_FAULT_NONE);
+        qc_keeper_wake(s);
+        ut_sleep_ms((a.hb_interval + 2u) * 1000u);
+        qc_keeper_state(s, &st);
+        dump_stat(s, "故障清除后");
+        step(st.state == QC_STATE_ONLINE,
+             "故障清除后回到稳定在线 state=%s", state_name(st.state));
+        }
+
+        if (CASE(3)) {
+        printf("\n  -- 用例3：心跳断连 → 退避重连 → 故障清除后恢复 --\n");
+        qc_keeper_set_fault(s, QC_FAULT_HB_FAIL);
+        ut_sleep_ms((a.hb_interval + 4u) * 1000u);
+        qc_keeper_state(s, &st);
+        dump_stat(s, "故障中");
+        step(st.attempts >= 1u || st.reconnects >= 1u,
+             "进入退避重连 attempts=%u reconnects=%u state=%s",
+             st.attempts, st.reconnects, state_name(st.state));
+        qc_keeper_set_fault(s, QC_FAULT_NONE);
+        qc_keeper_wake(s);
+        ut_sleep_ms((a.hb_interval + 5u) * 1000u);
+        qc_keeper_state(s, &st);
+        dump_stat(s, "故障清除后");
+        step(st.state == QC_STATE_ONLINE,
+             "故障清除后恢复在线 state=%s（累计重连=%u 重登=%u）",
+             state_name(st.state), st.reconnects, st.relogins);
+        }
+
+        if (a.concurrent > 0 && CASE(4))
+        {
+            printf("\n  -- 用例4：%d 个业务线程并发 + gate 串行化 --\n", a.concurrent);
+            thr_arg_t *tas  = (thr_arg_t *)calloc((size_t)a.concurrent, sizeof(thr_arg_t));
+            ut_tid_t  *tids = (ut_tid_t *)calloc((size_t)a.concurrent, sizeof(ut_tid_t));
+            int        i, bad = 0;
+
+            if (!tas || !tids)
+            {
+                step(0, "并发用例内存不足");
+            }
+            else
+            {
+                for (i = 0; i < a.concurrent; i++)
+                {
+                    tas[i].s        = s;
+                    tas[i].biz_type = "stats";
+                    tas[i].rounds   = 5;
+                    tas[i].rc       = 0;
+                    if (ut_thread_start(&tids[i], ut_worker, &tas[i]) != 0)
+                    {
+                        tas[i].rounds = 0;      /* 启动失败：后续不 join */
+                        bad = 1;
+                    }
+                }
+                for (i = 0; i < a.concurrent; i++)
+                    if (tas[i].rounds > 0)
+                        ut_thread_join(tids[i]);
+                for (i = 0; i < a.concurrent; i++)
+                    if (tas[i].rc != 0)
+                    {
+                        printf("        线程%d 失败 rc=%d\n", i, tas[i].rc);
+                        bad = 1;
+                    }
+                step(bad == 0,
+                     "%d 线程 × 5 次 BIZ_QUERY 全部成功（gate 与心跳共存，lockstep 未被破坏）",
+                     a.concurrent);
+            }
+            free(tas);
+            free(tids);
+        }
+
+        if (CASE(5)) {
+        printf("\n  -- 用例5：UI 无法提供口令 → 降级 OFFLINE → 恢复 --\n");
+        rctx.pass = NULL;                       /* 模拟"口令不可用" */
+        qc_keeper_set_fault(s, QC_FAULT_HB_RC3);
+        qc_keeper_wake(s);
+        ut_sleep_ms((a.hb_interval + 3u) * 1000u);
+        qc_keeper_state(s, &st);
+        dump_stat(s, "无凭据");
+        step(st.state == QC_STATE_OFFLINE,
+             "缺少凭据时降级 OFFLINE（UI 应弹登录框）state=%s", state_name(st.state));
+        rctx.pass = a.pass;
+        qc_keeper_set_fault(s, QC_FAULT_NONE);
+        qc_keeper_wake(s);
+        ut_sleep_ms((a.hb_interval + 4u) * 1000u);
+        qc_keeper_state(s, &st);
+        dump_stat(s, "恢复凭据后");
+        step(st.state == QC_STATE_ONLINE, "重新提供凭据后恢复在线 state=%s", state_name(st.state));
+        }
+
+        qc_keeper_stop(s);
+        step(qc_keeper_state(s, &st) == 0 && st.state == QC_STATE_IDLE, "qc_keeper_stop（线程已退出）");
     }
 
     /* 10. LOGOUT（--keep 时跳过） */

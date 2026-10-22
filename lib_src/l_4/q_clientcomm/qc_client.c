@@ -25,13 +25,10 @@
 #include <sys/time.h>
 #endif
 
-struct qc_session
-{
-    q_chan_t *chan;                  /* 安全通道句柄（内部） */
-    q_fd_t    fd;                    /* 已连接 socket（内部；(q_fd_t)-1 表示未连接） */
-    uint8_t   token[Q_CHAN_TOKEN_LEN]; /* 登录后缓存的会话 Token（32B） */
-    int       authed;                /* 是否已登录 */
-};
+#include "qc_keeper.h"          /* struct qc_session 定义 + 平台原语（M4 会话治理） */
+
+/* ===================== 会话结构 =====================
+ * 定义在内部头 qc_keeper.h（qc_client.c 与 keeper 各 .c 共用），此处不再重复。 */
 
 /* 设置阻塞 socket 的收发超时，避免异常对端令收包线程永久阻塞。
    平台差异：Windows 取 DWORD 毫秒，POSIX 取 struct timeval。 */
@@ -103,6 +100,24 @@ qc_session_t *qc_session_create(const uint8_t *server_pub_der, size_t server_pub
     s->fd = (q_fd_t)-1;
     s->authed = 0;
 
+    /* M4：留存建通道材料。断线重建时要销毁旧 chan 再按这套材料造一个新的 ——
+       见 qc_keeper.h 中 struct qc_session 的注释。 */
+    if (server_pub_len <= sizeof(s->pub_der))
+    {
+        memcpy(s->pub_der, server_pub_der, server_pub_len);
+        s->pub_len = server_pub_len;
+    }
+    s->seq0   = seq0;
+    s->key_id = key_id;
+
+    /* M4：串行化 gate 与状态锁。必须在 create 阶段初始化 —— 业务线程可能在
+       keeper 启动之前就已经在用 gate 了（qc_keeper_lock 不依赖 keeper 是否运行）。 */
+    qc_mutex_init(&s->io_lock);
+    qc_mutex_init(&s->st_lock);
+    s->io_inited = 1;
+    s->st_inited = 1;
+    s->state = QC_STATE_IDLE;
+
     /* 客户端：本地密钥对传 NULL（握手时生成临时密钥）；仅加载服务端静态公钥用于验签身份。 */
     s->chan = q_chan_create(Q_CHAN_MODE_CLIENT, NULL, 0, NULL, 0,
                             server_pub_der, server_pub_len, seq0, key_id);
@@ -118,10 +133,16 @@ void qc_session_destroy(qc_session_t *s)
 {
     if (!s)
         return;
+    /* M4：必须先停 keeper 线程，否则它会摸到已释放的 session / 已关闭的 socket */
+    qc_keeper_stop(s);
     qc_close(s);
     if (s->chan)
         q_chan_destroy(s->chan);
     q_mem_zero(s->token, sizeof(s->token));
+    /* 重连材料里含 SPA 密钥，一并清零 */
+    q_mem_zero(&s->rc, sizeof(s->rc));
+    if (s->io_inited) { qc_mutex_fini(&s->io_lock); s->io_inited = 0; }
+    if (s->st_inited) { qc_mutex_fini(&s->st_lock); s->st_inited = 0; }
     free(s);
 }
 

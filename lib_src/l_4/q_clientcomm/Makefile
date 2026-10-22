@@ -10,7 +10,14 @@
 TARGET    = libqclientcomm.a
 TARGET_SO = libqclientcomm.so
 HEADER    = qc_client.h
-OBJS      = qc_client.o
+OBJS      = qc_client.o \
+            qc_keeper_main.o qc_keeper_start.o qc_keeper_stop.o qc_keeper_state.o \
+            qc_keeper_lock.o qc_keeper_unlock.o qc_keeper_note_result.o qc_keeper_wake.o \
+            qc_keeper_set_fault.o qc_keeper_set_state.o qc_keeper_backoff_ms.o \
+            qc_keeper_reauth.o qc_keeper_rebuild.o qc_set_reconnect_info.o
+
+# 注：keeper 用平台原生线程（Windows=Win32 CRITICAL_SECTION/CreateThread，
+#     其它=pthread），不再额外依赖 libq*；仍需 $(LIB_PTHREAD) 供 POSIX 侧链接。
 
 # 逐级添加下层依赖（l_4 依赖 l_3 -> l_2 -> l_1）；仅供最终链接/ut 使用
 # 注：qc_knock 用到 l_3/q_spa，故闭包内必须含 -lqspa（缺则 Windows ld 报未决符号）

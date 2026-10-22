@@ -31,13 +31,17 @@ int q_chan_sm_transition(q_chan_st_t *st, q_chan_ev_t ev)
             return -1;
         break;
     case Q_CHAN_EV_LOGIN_OK:
-        if (cur == Q_CHAN_ST_KEYED)
+        /* KEYED -> AUTHED（首次登录）；AUTHED -> AUTHED（**重新登录**：Token 过期后
+           在原连接上重认证，见 q_chan_sm_cmd_allowed.c 的说明）。 */
+        if (cur == Q_CHAN_ST_KEYED || cur == Q_CHAN_ST_AUTHED)
             next = Q_CHAN_ST_AUTHED;
         else
             return -1;
         break;
     case Q_CHAN_EV_LOGIN_FAIL:
-        if (cur == Q_CHAN_ST_KEYED)
+        /* 登录失败一律断连：首次登录失败如此，重新登录失败也如此 ——
+           口令错误不该继续占着这条连接（否则会变成"半认证"的模糊态）。 */
+        if (cur == Q_CHAN_ST_KEYED || cur == Q_CHAN_ST_AUTHED)
             next = Q_CHAN_ST_CLOSED;
         else
             return -1;
