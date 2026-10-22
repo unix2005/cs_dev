@@ -72,7 +72,10 @@ CASES = [
     ("vehicles",  '{"org_id":"11","recursive":1}',        470),
     ("vehicles",  '{"org_id":"14","recursive":0}',          0),
     ("vehicles",  '{"online_only":1}',                 10846),
-    ("vehicles",  '{"ids":["000001","000002"]}',            2),
+    # ids 精确过滤：期望主键不能写死 —— 桩的主键是"车牌-颜色"，运行时先取第 0 页再拿它的主键回查。
+    # 这条用例因此同时证明「列表返回的主键」与「按主键过滤认的主键」是同一套：
+    # 真实系统主键非数字，任何一端偷偷做数值转换，这里立刻掉到 total=0。
+    ("vehicles",  "@IDS@",                                  2),
 ]
 
 
@@ -81,7 +84,13 @@ def selftest(host, port, token):
     fail = 0
     print("== biz 微服务自检 (%s:%d) ==" % (host, port))
 
+    # 先探一次第 0 页，取真实主键供 @IDS@ 用例使用
+    page0 = (call(host, port, build_req("vehicles", "", 0, 3, token)).get("data") or {})
+    real_ids = [it.get("vehicleId") for it in page0.get("items", [])][:2]
+
     for btype, param, want_total in CASES:
+        if param == "@IDS@":
+            param = json.dumps({"ids": real_ids}, ensure_ascii=False)
         rsp = call(host, port, build_req(btype, param, 0, 2, token))
         data = rsp.get("data") or {}
         got = data.get("total")

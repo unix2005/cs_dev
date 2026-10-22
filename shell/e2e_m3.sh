@@ -139,7 +139,17 @@ if [ -z "$ONLY" ] || [ "$ONLY" = "vehicles" ]; then
         run_case vehicles "" "$PAGING"
         run_case vehicles '{"org_id":"14","recursive":1}' "$PAGING"
         run_case vehicles '{"org_id":"14","recursive":0}' "$PAGING"
-        run_case vehicles '{"ids":["000001","000002","000003"]}' "$PAGING"
+        # ids 精确过滤：主键是"车牌-颜色"这类非数字串，不能写死 —— 先向 biz 探一页取真实主键，
+        # 再用它过滤。这条用例同时证明"列表返回的主键"与"按主键过滤认的主键"是同一套。
+        IDS_PARAM="$(python3 - "$SOFT_HOME" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/shell")
+import biz_probe
+rsp = biz_probe.call("127.0.0.1", 9003, biz_probe.build_req("vehicles", "", 0, 3, "11" * 32))
+print(json.dumps({"ids": [it["vehicleId"] for it in rsp["data"]["items"]]}, ensure_ascii=False))
+PY
+)" || IDS_PARAM='{"ids":["京Z38406-1","津N80851-1","冀P32707-1"]}'
+        run_case vehicles "$IDS_PARAM" "$PAGING"
     fi
 fi
 

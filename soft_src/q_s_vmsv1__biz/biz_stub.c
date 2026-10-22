@@ -219,6 +219,28 @@ static cJSON *make_org_item(uint32_t k)
 }
 
 /* ===================== d_vehicleinfo -> 一条 JSON ===================== */
+
+/* 车牌号：省份简称 + 字母 + 5 位数字（只由行号决定，保证翻页确定性）。
+   抽成函数是因为主键 vehicleId 与列 lisPlate 必须同源，且关键字过滤也要按它匹配。 */
+static const char *plate_of(uint32_t idx)
+{
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "%s%c%05u",
+             k_plate_prefix[idx % (sizeof(k_plate_prefix) / sizeof(char *))],
+             (char)('A' + stub_range(idx, 1u, 0u, 25u)),
+             stub_range(idx, 2u, 10000u, 99999u));
+    return buf;
+}
+
+/* 主键：车牌号 + 颜色（库表注释原文语义）；末尾 -V = 外单位导入车辆 */
+static const char *vehicle_id_of(uint32_t idx)
+{
+    static char buf[40];
+    snprintf(buf, sizeof(buf), "%s-%s",
+             plate_of(idx), stub_range(idx, 7u, 0u, 9u) == 9u ? "V" : "1");
+    return buf;
+}
+
 static cJSON *make_vehicle_item(uint32_t idx, const char *org_id, uint32_t online_total)
 {
     cJSON      *o;
@@ -241,16 +263,14 @@ static cJSON *make_vehicle_item(uint32_t idx, const char *org_id, uint32_t onlin
             alarm_text = k_alarm_text[b];
     }
 
-    /* —— d_vehicleinfo 库表列（camelCase）—— */
-    snprintf(buf, sizeof(buf), "%06u", idx + 1u);
-    cJSON_AddStringToObject(o, "vehicleId", buf);
+    /* —— d_vehicleinfo 库表列（camelCase）——
+       vehicleId 按库表注释的真实语义生成：**车牌号 + 颜色**，末尾 -V 表示外单位导入车辆。
+       （早期版本用 "%06u" 纯数字，与真实库形状不符 —— 客户端若依赖数字主键，接真库必废。） */
+    cJSON_AddStringToObject(o, "vehicleId", vehicle_id_of(idx));
 
     /* lis_plate = 省份简称 + 字母 + 5 位数字（CHAR(20)：Oracle 定长会补空格，
        真实实现取值后必须 RTRIM，否则 JSON 里会出现尾部空格） */
-    snprintf(buf, sizeof(buf), "%s%c%05u",
-             k_plate_prefix[idx % (sizeof(k_plate_prefix) / sizeof(char *))],
-             (char)('A' + stub_range(idx, 1u, 0u, 25u)),
-             stub_range(idx, 2u, 10000u, 99999u));
+    snprintf(buf, sizeof(buf), "%s", plate_of(idx));
     cJSON_AddStringToObject(o, "lisPlate", buf);
 
     snprintf(buf, sizeof(buf), "%u", 1u + (idx % 5u));   /* 1蓝 2黄 3白 4黑 5绿 */
@@ -402,13 +422,13 @@ int biz_stub_vehicles(cJSON *items, const biz_veh_filter_t *f,
             if ((af & mask) == 0u) continue;
         }
 
-        /* —— 按主键精确过滤（组织树上勾选了若干车辆）—— */
+        /* —— 按主键精确过滤（组织树上勾选了若干车辆）——
+           主键是"车牌号+颜色"字符串，直接字符串比对，不做任何数值转换。 */
         if (f->id_count > 0)
         {
-            char vid[24];
-            int   hit = 0, k;
+            const char *vid = vehicle_id_of(idx);
+            int         hit = 0, k;
 
-            snprintf(vid, sizeof(vid), "%06u", idx + 1u);   /* 与 make_vehicle_item 的 vehicleId 同规则 */
             for (k = 0; k < f->id_count; k++)
                 if (strcmp(f->ids[k], vid) == 0) { hit = 1; break; }
             if (!hit) continue;
@@ -417,13 +437,9 @@ int biz_stub_vehicles(cJSON *items, const biz_veh_filter_t *f,
         /* —— 关键字过滤（车牌 / 自编号）—— */
         if (f->keyword[0])
         {
-            char plate[32], self_code[32];
-            snprintf(plate, sizeof(plate), "%s%c%05u",
-                     k_plate_prefix[idx % (sizeof(k_plate_prefix) / sizeof(char *))],
-                     (char)('A' + stub_range(idx, 1u, 0u, 25u)),
-                     stub_range(idx, 2u, 10000u, 99999u));
+            char self_code[32];
             snprintf(self_code, sizeof(self_code), "QC%05u", idx % 100000u);
-            if (!strstr(plate, f->keyword) && !strstr(self_code, f->keyword))
+            if (!strstr(plate_of(idx), f->keyword) && !strstr(self_code, f->keyword))
                 continue;
         }
 
