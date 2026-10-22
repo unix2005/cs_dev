@@ -75,18 +75,22 @@ else
   echo "（跳过）本地 bash 版本 < 4，check_layer.sh 需 bash>=4.3，请在 Linux/CI 运行"
 fi
 
-echo "== [4/4] 构建 soft_src 守护进程（仅 Linux，依赖 Tongsuo 已构建的库）=="
+echo "== [4/4] 构建 soft_src 守护进程与微服务（仅 Linux，依赖 Tongsuo 已构建的库）=="
 if [ "$(uname -s)" = "Linux" ]; then
-  # 新增守护进程须在此登记；common 必须先于 security/* 构建
-  SOFT_MODULES=(
-    gtk_vms_v1/common
-    gtk_vms_v1/security/netd
-    gtk_vms_v1/security/bizd
-    gtk_vms_v1/security/knockd
-  )
-  for m in "${SOFT_MODULES[@]}"; do
-    echo ">> 构建 soft_src/$m"
-    ( cd "$SOFT_HOME/soft_src/$m" && make all ) || { echo "构建失败: $m"; exit 1; }
+  # 模块清单的**单一事实来源是 soft_src/Makefile**，此处不再另维护一份登记列表 ——
+  # 此前 build.sh 里写死的是历史路径 soft_src/gtk_vms_v1/security/{netd,bizd,knockd}，
+  # 守护进程早已迁到 soft_src/{netd,bizd,knockd}，列表过期后表现为
+  # "cd: No such file or directory → 构建失败"，且每次换机器都要重新踩一遍。
+  # 新增守护进程请登记到 soft_src/Makefile。
+  echo ">> 构建 soft_src 守护进程（netd / bizd / knockd）"
+  ( cd "$SOFT_HOME/soft_src" && make all ) || { echo "构建失败: soft_src 守护进程"; exit 1; }
+
+  # 下游微服务（联调用桩实现）：不在守护进程体系内，单独编排。
+  for m in q_s_vmsv1__login q_s_vmsv1__biz; do
+    if [ -f "$SOFT_HOME/soft_src/$m/Makefile" ]; then
+      echo ">> 构建 soft_src/$m"
+      ( cd "$SOFT_HOME/soft_src/$m" && make all ) || { echo "构建失败: $m"; exit 1; }
+    fi
   done
 else
   echo "（跳过）非 Linux 环境不构建守护进程（需 Tongsuo 链接）"
