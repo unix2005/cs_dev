@@ -24,7 +24,8 @@ import os
 import sys
 
 # ----------------------------- ABI 常量（必须与 vms_api.h 一致） -----------------------------
-VMS_ABI_VERSION = 5
+# v6：M4 会话治理（keeper 状态/回调/重登）。只增函数与新结构体，未改既有布局
+VMS_ABI_VERSION = 6
 
 VMS_CODE_MAX = 24
 VMS_PLATE_MAX = 16

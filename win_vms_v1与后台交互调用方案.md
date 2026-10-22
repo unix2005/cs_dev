@@ -403,6 +403,103 @@ comment on column "d_vehicleinfo"."vehicle_id" is
 
 ---
 
+## 7.5 M4 验收记录（2026-10-22，会话治理：心跳 / 退避重连 / Token 重登 / 串行化 gate）
+
+### 为什么必须下沉到 `l_4`，不能写在 UI 里
+
+M4 之前"心跳"只是 `qc_heartbeat()` 一个同步函数，UI 想保活得自己起线程 —— 那就必然出现：
+业务线程和心跳线程同时往同一条连接写（协议是严格 lockstep，交错即解包错位）、
+Token TTL 到了没人续（1800s，且**心跳不续期**）、断线后没人敲门（nftables 放行条目有 TTL）。
+三端各写一份 = 三份互相不通的 bug。所以 keeper 放进 `l_4/q_clientcomm`，三端共用同一份 C 代码。
+
+### 线程模型：一会话一 gate
+
+```
+  UI 线程 ──┐
+            ├── [ io_lock（递归） ] ──> 连接（一问一答）
+  keeper 线程 ┘
+```
+
+- keeper 线程按 `hb_interval`（默认 60s）发心跳；失败退避重连；心跳/业务回 `3` 时重新登录。
+- 业务线程调用 `qc_*` 前必须 `qc_keeper_lock()`，返回后 `qc_keeper_unlock()`；心跳走**同一把锁**，故严格互斥。
+- **锁必须递归**：UI 会用 `vms_lock()` 把"先查组织树再查车辆"合成原子序列，单次接口内部又各自加锁，
+  不可重入就是必死自锁。Windows `CRITICAL_SECTION` 天然递归；POSIX 必须显式
+  `PTHREAD_MUTEX_RECURSIVE`（这一条不设，三端行为直接分叉）。
+- 未来"定位/视频各一条长连接" = 各自 `qc_session_create` + `qc_keeper_start`，**不需要改内核**。
+
+### 状态机与退避
+
+| 状态 | 含义 | 转出条件 |
+|---|---|---|
+| `ONLINE` | 已认证，心跳正常 | 心跳失败 → `RECONNECTING`；回 3 → `REAUTHING` |
+| `REAUTHING` | 连接还在，仅 Token 失效 | 原连接重发 SALT+LOGIN；成功 → `ONLINE`，失败 → `RECONNECTING` |
+| `RECONNECTING` | 连接不可用，退避中 | `close → [敲门] → connect → hello → 重登` |
+| `OFFLINE` | 超 `max_retry` 或 UI 无凭据 | 停止自动重试，等 `qc_keeper_wake()`（UI 点"重试"/重新登录） |
+| `IDLE` | 未登录 / keeper 未启动 | — |
+
+退避：`base * 2^(n-1)`，上限 `max`（默认 30s），**带 ±20% 抖动** ——
+车队几千台车同时断线，不加抖动就是重连风暴，把刚起来的 netd 再打死一次。
+
+心跳回 3 **不退避**：Token 失效不是网络问题，立刻重登即可，退避只会白白拖长不可用窗口。
+
+### 口令红线：native 不存口令，也不存派生值
+
+重登需要 `pwd_hash` 时，由 `cfg.on_relogin` 回调**向 UI 现要**，内核用完立即 `q_mem_zero`。
+UI 侧自己决定是缓存口令、走系统凭据管理器，还是弹窗重输；回调返回非 0 = 无法提供 → 转 `OFFLINE`。
+OTP **不复用**（重登传 `"000000"`）：缓存在内核里会让"OTP 种子严禁长驻"的约束形同虚设；
+服务端若强校验 OTP，重登会失败并转 `OFFLINE`，由 UI 重走完整登录（此时用户可输新 OTP）。
+
+### 协议侧的两处必要改动
+
+| 位置 | 改动 | 理由 |
+|---|---|---|
+| `q_chan_sm_cmd_allowed.c` | `AUTHED` 白名单追加 `SALT_QUERY` / `LOGIN` | Token 有 TTL 且**心跳不续期**，长连接必须能原连接重认证，否则到期只能拆连接 |
+| `q_chan_sm_transition.c` | `LOGIN_OK` 允许 `AUTHED->AUTHED`；`LOGIN_FAIL` 一律 `->CLOSED` | 重登是合法转移；口令错不该继续占着连接 |
+
+未扩大攻击面：这两条都是在**已完成 SM2 握手 + SM4-GCM 通道且已认证过**的前提下才可达。
+
+### 实测（Linux 全链路，`shell/e2e_m4.sh`，netd/bizd/login/biz 全起）
+
+```
+用例1 正常心跳        [OK] state=ONLINE 心跳=2(失败0)
+用例2 Token 失效重登  [OK] relogins=3（失败心跳=4）→ 清故障后回到 ONLINE
+                     [OK] pwd_hash 经 UI 回调现派生 calls=4（内核不存口令）
+用例3 断连退避重连    [OK] 故障中 state=RECONNECTING attempts=1 reconnects=2
+                     [OK] 清故障 + wake → ONLINE（累计重连=3 重登=4）
+用例4 并发 gate       [OK] 2 线程 × 5 次 BIZ_QUERY 全部成功（lockstep 未被破坏）
+用例5 无凭据降级      [OK] state=OFFLINE rc=-2 → 恢复凭据 + wake → ONLINE
+                     [OK] qc_keeper_stop（线程已退出）
+LOGIN CLOSED-LOOP ALL PASS
+```
+
+Windows 侧：`vms_core.dll` ABI=6，`company 128B / vehicle 312B / query 5256B` 与 C# 一致，
+登录 + 组织 + 车辆分页冒烟全过；新增 12 个导出符号（`vms_keeper_start/stop/wake`、
+`vms_get_session_info`、`vms_set_session_callback`、`vms_set_relogin_callback`、
+`vms_lock/unlock`、`vms_derive_pwd_hash` 等）已确认导出；`dotnet build` 0 警告 0 错误。
+
+### 踩到并已修的 4 个坑
+
+1. **改 `struct qc_session` 后必须全量清 `.o`** —— 只重编了改动文件，`.a` 里混着新旧两种布局的对象，
+   表现为" `qc_keeper_start` 明明把 `state` 写成 1，`qc_keeper_state()` 却读到 0"、
+   "故障注入写了却完全不生效"。这种错**不会报编译错误**，只会给出无法解释的运行时值。
+   以后凡动内部结构体：`find lib_src -name '*.o' -delete` 再全量编。
+2. **重建连接必须销毁旧 `q_chan_t` 再新建** —— 复用已握过手的 chan 做二次握手必失败
+   （状态机只接受 `NEW/HELLO -> KEYED`），且新 TCP 必须配新通道（Token 绑定 `channel_id`）。
+   故 `qc_session` 里留存 `pub_der/pub_len/seq0/key_id` 四件套。
+3. **状态回调必须在锁外调用** —— UI 回调里很可能反过来再查 state，持 `st_lock` 回调 = 自锁死。
+4. **故障注入常开时状态本就在 `ONLINE ↔ REAUTHING` 之间摆动**，用例断言"最终 ONLINE"必须先
+   关注入再观察，否则是断言写错而非代码错。
+   另外 UT 输出重定向到文件/管道时是**全缓冲**，挂死时一行都看不到 —— 脚本已加 `stdbuf -oL` + `timeout`。
+
+### 已知限制 / 下一步
+
+- `max_retry=0` 表示无限重试（不退到 `OFFLINE`）；生产建议按业务给 5~8 次后交给 UI。
+- 心跳**不续期** Token，TTL 1800s 到期后靠"心跳回 3 → 重登"兜底，不是提前续期。
+- keeper 只管**一条**连接；多连接（定位/视频）需要上层再建 session，内核已支持但尚未实跑。
+- C# 仍是环境变量自动登录通道；M5 应换正式登录对话框 + 凭据管理，并把 state 变化显示到状态栏。
+
+---
+
 ## 8. 一句话总结
 
 > **该调的函数就是 `qc_client.h` 那 11 个 `qc_*`（外加一个待补的 SPA 敲门 `qc_knock`）**；
