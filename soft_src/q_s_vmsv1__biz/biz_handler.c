@@ -2,8 +2,11 @@
  * @file biz_handler.c
  * @brief 业务微服务请求处理：解析 bizd JSON 信封 -> 按 biz_type 取数 -> 生成响应 JSON
  *
- * M2 范围：只打通 BIZ_QUERY(0x0020) 的 stats 子类型；
- *          companies / vehicles 在 M3 补齐（当前返回 Q_IPC_R_UNSUPPORTED）。
+ * 支持的 biz_type（M3）：
+ *   - stats     : 全量统计（总数/在线/离线/不纳入/未处理报警）
+ *   - companies : d_org_info 组织机构列表（分页 + parent 过滤）
+ *   - vehicles  : d_vehicleinfo 车辆列表（分页 + 组织子树/关键字/在线/报警/主键过滤）
+ * 接口形状以《biz微服务接口约定.md》为准；data 域字段一律是库表列名的 camelCase。
  *
  * 鉴权：本服务只做"Token 非空且非全零"的桩校验。
  *       真实部署应校验 (token, channel_id, user_id, src_ip) 四元绑定并查会话存储，
@@ -92,21 +95,198 @@ static char *handle_stats(const char *id)
     return build_rsp(id, Q_IPC_R_OK, "ok", data);
 }
 
+/* 取 params 对象（bizd 生成；缺失返回 NULL） */
+static const cJSON *params_of(const cJSON *root)
+{
+    cJSON *p = root ? cJSON_GetObjectItem(root, "params") : NULL;
+    return (p && cJSON_IsObject(p)) ? p : NULL;
+}
+
+/* ===================== M3：分页 / 业务参数解析 ===================== */
+
+/* 分页参数：来自客户端的 0x0203 OFFSET / 0x0204 LIMIT，bizd 已转成 params.offset/limit。
+   limit==0（客户端未指定）-> 默认页大小；再统一 clamp 到 page_limit_max。 */
+static void get_pagination(const cJSON *params, uint32_t *offset, uint32_t *limit)
+{
+    const cJSON *o, *l;
+    uint32_t     ov = 0u, lv = BIZ_PAGE_LIMIT_DEF;
+
+    if (params)
+    {
+        o = cJSON_GetObjectItem(params, "offset");
+        if (o && cJSON_IsNumber(o) && o->valuedouble >= 0.0) ov = (uint32_t)o->valuedouble;
+        l = cJSON_GetObjectItem(params, "limit");
+        if (l && cJSON_IsNumber(l) && l->valuedouble > 0.0)  lv = (uint32_t)l->valuedouble;
+    }
+    if (lv == 0u)                          lv = BIZ_PAGE_LIMIT_DEF;
+    if (g_bcfg.page_limit_max && lv > g_bcfg.page_limit_max)
+        lv = g_bcfg.page_limit_max;
+    *offset = ov;
+    *limit  = lv;
+}
+
+/* params.biz_param 是 JSON **文本**（TLV 0x0202 承载的是 UTF-8 文本），需二次解析。
+   返回的对象由调用方 cJSON_Delete；不存在/为空返回 NULL（不视为错误：用默认过滤）。 */
+static cJSON *biz_param_obj(const cJSON *params, int *bad)
+{
+    cJSON *bpj = params ? cJSON_GetObjectItem(params, "biz_param") : NULL;
+
+    if (bad) *bad = 0;
+    if (!bpj || !cJSON_IsString(bpj) || !bpj->valuestring || !bpj->valuestring[0])
+        return NULL;
+    {
+        cJSON *o = cJSON_Parse(bpj->valuestring);
+        if (!o && bad) *bad = 1;
+        return o;
+    }
+}
+
+static const char *bp_str(const cJSON *bp, const char *key)
+{
+    cJSON *v = bp ? cJSON_GetObjectItem(bp, key) : NULL;
+    return (v && cJSON_IsString(v) && v->valuestring) ? v->valuestring : NULL;
+}
+
+static int bp_int(const cJSON *bp, const char *key, int def)
+{
+    cJSON *v = bp ? cJSON_GetObjectItem(bp, key) : NULL;
+    if (v && cJSON_IsNumber(v)) return (int)v->valuedouble;
+    if (v && cJSON_IsBool(v))   return cJSON_IsTrue(v) ? 1 : 0;
+    return def;
+}
+
+/* 统一的分页列表信封：data = {total, offset, limit, items[]} */
+static char *build_list_rsp(const char *id, cJSON *items, uint32_t total,
+                            uint32_t offset, uint32_t limit)
+{
+    cJSON *data = cJSON_CreateObject();
+
+    if (!data) { if (items) cJSON_Delete(items); return NULL; }
+    cJSON_AddNumberToObject(data, "total",  (double)total);
+    cJSON_AddNumberToObject(data, "offset", (double)offset);
+    cJSON_AddNumberToObject(data, "limit",  (double)limit);
+    cJSON_AddItemToObject(data, "items", items ? items : cJSON_CreateArray());
+    return build_rsp(id, Q_IPC_R_OK, "ok", data);
+}
+
+/* companies：d_org_info 组织机构列表
+   biz_param: {"parent_org_id":"1","recursive":1}
+              parent_org_id 省略/空 = 返回全部（客户端首屏建树用） */
+static char *handle_companies(struct biz_ctx *g, const cJSON *params, const char *id)
+{
+    cJSON      *bp = NULL, *items;
+    const char *parent;
+    int         recursive, bad = 0;
+    uint32_t    offset, limit, total = 0u;
+
+    (void)g;
+    bp = biz_param_obj(params, &bad);
+    if (bad) return build_rsp(id, Q_IPC_R_BADREQ, "biz_param is not valid JSON", NULL);
+
+    parent    = bp_str(bp, "parent_org_id");
+    recursive = bp_int(bp, "recursive", 1);
+    get_pagination(params, &offset, &limit);
+
+    items = cJSON_CreateArray();
+    if (!items) { cJSON_Delete(bp); return NULL; }
+    if (biz_stub_orgs(items, parent, recursive, offset, limit, &total) != 0)
+    {
+        cJSON_Delete(items);
+        cJSON_Delete(bp);
+        return build_rsp(id, Q_IPC_R_INTERNAL, "stub orgs failed", NULL);
+    }
+    cJSON_Delete(bp);
+    return build_list_rsp(id, items, total, offset, limit);
+}
+
+/* vehicles：d_vehicleinfo 车辆列表
+   biz_param: {"org_id":"14","recursive":1,"keyword":"京A","online_only":0,
+               "alarm_only":0,"alarm_mask":0,"ids":["000123", ...]} */
+static char *handle_vehicles(struct biz_ctx *g, const cJSON *params, const char *id)
+{
+    cJSON            *bp = NULL, *items, *idsarr;
+    biz_veh_filter_t  f;
+    const char       *s;
+    int               bad = 0;
+    uint32_t          offset, limit, total = 0u;
+
+    (void)g;
+    bp = biz_param_obj(params, &bad);
+    if (bad) return build_rsp(id, Q_IPC_R_BADREQ, "biz_param is not valid JSON", NULL);
+
+    memset(&f, 0, sizeof(f));
+    f.recursive = 1;                       /* 默认"该组织及其所有下级" */
+
+    s = bp_str(bp, "org_id");
+    if (s) snprintf(f.org_id, sizeof(f.org_id), "%s", s);
+    s = bp_str(bp, "keyword");
+    if (s) snprintf(f.keyword, sizeof(f.keyword), "%s", s);
+    if (bp) f.recursive    = bp_int(bp, "recursive", 1);
+    if (bp) f.online_only  = bp_int(bp, "online_only", 0);
+    if (bp) f.alarm_only   = bp_int(bp, "alarm_only", 0);
+    if (bp) f.alarm_mask   = (uint32_t)bp_int(bp, "alarm_mask", 0);
+
+    idsarr = bp ? cJSON_GetObjectItem(bp, "ids") : NULL;
+    if (idsarr && cJSON_IsArray(idsarr))
+    {
+        cJSON *e;
+        cJSON_ArrayForEach(e, idsarr)
+        {
+            if (f.id_count >= BIZ_IDS_MAX) break;
+            if (cJSON_IsString(e) && e->valuestring && e->valuestring[0])
+            {
+                snprintf(f.ids[f.id_count], BIZ_ID_MAX, "%s", e->valuestring);
+                ++f.id_count;
+            }
+            else if (cJSON_IsNumber(e))     /* 也接受数值主键，方便裸协议调试 */
+            {
+                snprintf(f.ids[f.id_count], BIZ_ID_MAX, "%06u", (uint32_t)e->valuedouble);
+                ++f.id_count;
+            }
+        }
+    }
+
+    get_pagination(params, &offset, &limit);
+
+    items = cJSON_CreateArray();
+    if (!items) { cJSON_Delete(bp); return NULL; }
+    if (biz_stub_vehicles(items, &f, offset, limit, &total) != 0)
+    {
+        cJSON_Delete(items);
+        cJSON_Delete(bp);
+        return build_rsp(id, Q_IPC_R_INTERNAL, "stub vehicles failed", NULL);
+    }
+    cJSON_Delete(bp);
+    return build_list_rsp(id, items, total, offset, limit);
+}
+
 /* BIZ_QUERY：按 biz_type 分发 */
 static char *handle_biz_query(struct biz_ctx *g, const cJSON *root, const char *id)
 {
-    const char *type = param_type(root);
+    const char   *type = param_type(root);
+    const cJSON  *params;
 
     if (!type)
         return build_rsp(id, Q_IPC_R_BADREQ, "missing biz_type", NULL);
+
+    params = params_of(root);
 
     if (strcmp(type, BIZ_TYPE_STATS) == 0)
     {
         QLOG_INFO(g->log, "biz_query stats (id=%s)", id ? id : "");
         return handle_stats(id);
     }
+    if (strcmp(type, BIZ_TYPE_COMPANIES) == 0)
+    {
+        QLOG_INFO(g->log, "biz_query companies (id=%s)", id ? id : "");
+        return handle_companies(g, params, id);
+    }
+    if (strcmp(type, BIZ_TYPE_VEHICLES) == 0)
+    {
+        QLOG_INFO(g->log, "biz_query vehicles (id=%s)", id ? id : "");
+        return handle_vehicles(g, params, id);
+    }
 
-    /* M3 待补：companies / vehicles */
     QLOG_WARN(g->log, "biz_query 暂不支持的 biz_type=%s (id=%s)", type, id ? id : "");
     return build_rsp(id, Q_IPC_R_UNSUPPORTED, "unsupported biz_type", NULL);
 }

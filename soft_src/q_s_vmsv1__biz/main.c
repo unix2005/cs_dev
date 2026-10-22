@@ -6,8 +6,9 @@
  *
  * 用法：
  *   q_service_biz [-p <端口>] [--total N] [--online N] [--offline N]
- *                 [--excluded N] [--alarm N] [--no-token] [-l <日志文件>] [-L <日志级别>] [-h]
- *   默认: 端口=9003，统计基线=34554/10846/23708/0/46343
+ *                 [--excluded N] [--alarm N] [--vtotal N] [--vonline N] [--page-max N]
+ *                 [--no-token] [-l <日志文件>] [-L <日志级别>] [-h]
+ *   默认: 端口=9003，统计基线=34554/10846/23708/0/46343，车辆桩 34554 台 / 在线 10846 台
  *   优先级: 命令行 > 环境(BIZ_PORT/BIZ_TOTAL/...) > 内置默认
  */
 #include "srv_biz.h"
@@ -19,10 +20,12 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
             "用法: %s [-p <端口>] [--total N] [--online N] [--offline N]\n"
-            "       [--excluded N] [--alarm N] [--no-token] [-l <日志>] [-L <级别>] [-h]\n",
+            "       [--excluded N] [--alarm N] [--vtotal N] [--vonline N] [--page-max N]\n"
+            "       [--no-token] [-l <日志>] [-L <级别>] [-h]\n",
             argv0);
-    fprintf(stderr, "  默认: 端口=%d 总数=%u 在线=%u 报警=%u\n",
-            BIZ_PORT_DEF, BIZ_TOTAL_DEF, BIZ_ONLINE_DEF, BIZ_ALARM_UNHANDLED_DEF);
+    fprintf(stderr, "  默认: 端口=%d 总数=%u 在线=%u 报警=%u 车辆桩=%u/%u 单页上限=%u\n",
+            BIZ_PORT_DEF, BIZ_TOTAL_DEF, BIZ_ONLINE_DEF, BIZ_ALARM_UNHANDLED_DEF,
+            BIZ_VTOTAL_DEF, BIZ_VONLINE_DEF, BIZ_PAGE_LIMIT_MAX);
     fprintf(stderr, "  优先级: 命令行 > 环境(BIZ_PORT/BIZ_TOTAL/.../BIZ_NO_TOKEN) > 内置默认\n");
 }
 
@@ -39,6 +42,10 @@ void biz_cfg_defaults(void)
     g_bcfg.offline         = BIZ_OFFLINE_DEF;
     g_bcfg.excluded        = BIZ_EXCLUDED_DEF;
     g_bcfg.alarm_unhandled = BIZ_ALARM_UNHANDLED_DEF;
+    /* M3：d_vehicleinfo / d_org_info 桩规模 */
+    g_bcfg.vehicle_total   = BIZ_VTOTAL_DEF;
+    g_bcfg.vehicle_online  = BIZ_VONLINE_DEF;
+    g_bcfg.page_limit_max  = BIZ_PAGE_LIMIT_MAX;
     g_bcfg.require_token   = 1;
     g_bcfg.log_level       = (int)Q_LOG_INFO;
     g_bcfg.log_console     = 1;
@@ -60,6 +67,9 @@ static void apply_env(void)
     if (getenv("BIZ_OFFLINE"))   g_bcfg.offline   = (uint32_t)env_u32("BIZ_OFFLINE", BIZ_OFFLINE_DEF);
     if (getenv("BIZ_EXCLUDED"))  g_bcfg.excluded  = (uint32_t)env_u32("BIZ_EXCLUDED", BIZ_EXCLUDED_DEF);
     if (getenv("BIZ_ALARM"))     g_bcfg.alarm_unhandled = (uint32_t)env_u32("BIZ_ALARM", BIZ_ALARM_UNHANDLED_DEF);
+    if (getenv("BIZ_VTOTAL"))    g_bcfg.vehicle_total   = (uint32_t)env_u32("BIZ_VTOTAL", BIZ_VTOTAL_DEF);
+    if (getenv("BIZ_VONLINE"))   g_bcfg.vehicle_online  = (uint32_t)env_u32("BIZ_VONLINE", BIZ_VONLINE_DEF);
+    if (getenv("BIZ_PAGE_MAX"))  g_bcfg.page_limit_max  = (uint32_t)env_u32("BIZ_PAGE_MAX", BIZ_PAGE_LIMIT_MAX);
     if (getenv("BIZ_NO_TOKEN"))  g_bcfg.require_token   = 0;
 }
 
@@ -90,6 +100,12 @@ int main(int argc, char *argv[])
             g_bcfg.excluded = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--alarm") == 0 && i + 1 < argc)
             g_bcfg.alarm_unhandled = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "--vtotal") == 0 && i + 1 < argc)
+            g_bcfg.vehicle_total = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "--vonline") == 0 && i + 1 < argc)
+            g_bcfg.vehicle_online = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "--page-max") == 0 && i + 1 < argc)
+            g_bcfg.page_limit_max = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (strcmp(argv[i], "--no-token") == 0)
             g_bcfg.require_token = 0;
         else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc)
@@ -118,10 +134,11 @@ int main(int argc, char *argv[])
     if (daemon_install_signal_handlers() != 0)
         QLOG_WARN(g_biz.log, "信号处理器安装失败（将无法优雅退出）");
 
-    QLOG_INFO(g_biz.log, "biz 启动 (pid=%d, port=%d, workers=%d, 统计 %u/%u/%u, 报警 %u, 校验token=%d)",
+    QLOG_INFO(g_biz.log, "biz 启动 (pid=%d, port=%d, workers=%d, 统计 %u/%u/%u, 报警 %u, 车辆桩 %u/%u, 单页上限 %u, 校验token=%d)",
               (int)getpid(), g_bcfg.port, g_bcfg.nworkers,
               g_bcfg.total, g_bcfg.online, g_bcfg.offline,
-              g_bcfg.alarm_unhandled, g_bcfg.require_token);
+              g_bcfg.alarm_unhandled, g_bcfg.vehicle_total, g_bcfg.vehicle_online,
+              g_bcfg.page_limit_max, g_bcfg.require_token);
 
     g_biz.reactor = q_reactor_create();
     if (!g_biz.reactor) { QLOG_FATAL(g_biz.log, "reactor 创建失败"); goto out_log; }

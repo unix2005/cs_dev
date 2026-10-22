@@ -56,6 +56,8 @@ typedef struct
     /* —— M2：业务查询 —— */
     const char *biz_type;     /* 默认 "stats" */
     const char *biz_param;    /* 业务参数 JSON，可 NULL */
+    uint32_t    biz_offset;   /* 分页偏移（M3：列表类业务用） */
+    uint32_t    biz_limit;    /* 每页条数；0=由服务端取默认 */
     int         no_biz;       /* 1=跳过业务查询（只验登录） */
     int         keep;         /* 1=登录后不断开（供手工观察），跳过 logout */
     int         verbose;
@@ -67,14 +69,16 @@ static void usage(const char *argv0)
         "用法: %s --host <ip> --port <n> --user <name> --pass <pwd> --pub <der>\n"
         "        [--otp <code>] [--iter <n>] [--devid <hex>] [--cver <str>]\n"
         "        [--knock <ip:port>] [--spakey <file>] [--reqport <n>] [--reqttl <n>]\n"
-        "        [--biz-type <type>] [--biz-param <json>] [--no-biz] [--keep] [--v]\n"
+        "        [--biz-type <type>] [--biz-param <json>] [--offset <n>] [--limit <n>]\n"
+        "        [--no-biz] [--keep] [--v]\n"
         "  --pub     服务端静态 SM2 公钥 DER（netd pub_file），必填\n"
         "  --knock   knockd UDP 地址（如 127.0.0.1:5001）；不给则跳过 SPA 敲门\n"
         "  --spakey  SPA 密钥文件（16 字节）；配合 --knock，缺省读环境变量 GTKVMS_SPA_KEY_FILE\n"
         "  --iter    PBKDF2-SM3 迭代次数（默认 %u，须与登录服务一致）\n"
         "  --biz-type  业务子类型（默认 stats）；服务端未实现时回结果码 6(UNSUPPORTED)\n"
-        "  --biz-param 业务参数（UTF-8 JSON 文本），随 BIZ_QUERY 下发\n"
-        "  --no-biz    跳过业务查询，只验登录闭环\n"
+    "  --biz-param 业务参数（UTF-8 JSON 文本），随 BIZ_QUERY 下发\n"
+    "  --offset/--limit  分页（M3：companies / vehicles 列表类业务）；limit 默认由服务端取\n"
+    "  --no-biz    跳过业务查询，只验登录闭环\n"
         "  --keep    登录成功后保持连接不登出（用于观察服务端日志）\n",
         argv0, (unsigned)Q_PBKDF2_ITER_DEFAULT);
 }
@@ -214,6 +218,8 @@ static int parse_args(int argc, char **argv, args_t *a)
         else if (!strcmp(k, "--reqttl"))  a->reqttl  = atoi(argv[++i]);
         else if (!strcmp(k, "--biz-type"))  a->biz_type  = argv[++i];
         else if (!strcmp(k, "--biz-param")) a->biz_param = argv[++i];
+        else if (!strcmp(k, "--offset"))    a->biz_offset = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(k, "--limit"))     a->biz_limit  = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(k, "--no-biz"))    a->no_biz    = 1;
         else if (!strcmp(k, "--keep"))    a->keep    = 1;
         else if (!strcmp(k, "--v"))       a->verbose = 1;
@@ -448,14 +454,18 @@ int main(int argc, char **argv)
        客户端约定 TLV-only：这里只把下游 JSON 原文打印出来供对账，不做解析。 */
     if (!a.no_biz)
     {
-        uint8_t resp[8192];
+        /* 列表类业务（companies/vehicles）一页 JSON 可达数十 KB，
+           缓冲必须大于 Q_IPC_TLV_MAX(60000)，否则门面会直接报"缓冲不足"。 */
+        uint8_t resp[65536];
         size_t  rlen = 0u;
 
         t0 = clock();
-        rc = qc_biz_query(s, a.biz_type, a.biz_param, 0u, 0u, resp, sizeof(resp), &rlen);
+        rc = qc_biz_query(s, a.biz_type, a.biz_param, a.biz_offset, a.biz_limit,
+                          resp, sizeof(resp), &rlen);
         t1 = clock();
-        step(rc == 0, "qc_biz_query(type=%s, param=%s) rc=%d  %.0fms",
-             a.biz_type, a.biz_param ? a.biz_param : "(none)", rc,
+        step(rc == 0, "qc_biz_query(type=%s, param=%s, offset=%u, limit=%u) rc=%d  %.0fms",
+             a.biz_type, a.biz_param ? a.biz_param : "(none)",
+             (unsigned)a.biz_offset, (unsigned)a.biz_limit, rc,
              (double)(t1 - t0) * 1000.0 / (double)CLOCKS_PER_SEC);
 
         if (rc == 0)
@@ -480,8 +490,20 @@ int main(int argc, char **argv)
                 }
             }
             if (body && blen > 0u)
-                printf("       下游响应(%u 字节): %.*s\n", (unsigned)blen, (int)blen,
-                       (const char *)body);
+            {
+                /* 列表响应可达几十 KB，完整打印会淹没终端：超过 1500 字节只打头尾 */
+                printf("       下游响应(%u 字节): ", (unsigned)blen);
+                if (blen <= 1500u)
+                {
+                    printf("%.*s\n", (int)blen, (const char *)body);
+                }
+                else
+                {
+                    printf("%.1200s ...[省略 %u 字节]... %.200s\n",
+                           (const char *)body, (unsigned)(blen - 1400u),
+                           (const char *)body + (blen - 200u));
+                }
+            }
             else
                 step(0, "业务响应缺少 BODY");
         }

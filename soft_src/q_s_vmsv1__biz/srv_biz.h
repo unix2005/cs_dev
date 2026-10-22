@@ -69,6 +69,19 @@ extern "C" {
 #define BIZ_TYPE_COMPANIES  "companies"
 #define BIZ_TYPE_VEHICLES   "vehicles"
 
+/* ===================== M3：桩数据规模（不连库的替身） =====================
+ * 真实部署时 d_org_info / d_vehicleinfo 由 DB 提供；此处用确定性算法按行号生成，
+ * 保证同一 (offset,limit) 每次返回完全一致（分页翻页不会重复/丢行）。 */
+#define BIZ_VTOTAL_DEF      34554u  /* d_vehicleinfo 行数（桩；--vtotal 可覆盖） */
+#define BIZ_VONLINE_DEF     10846u  /* 在线数（桩；--vonline 可覆盖） */
+#define BIZ_ID_MAX          40      /* 主键字符串容量：org_id CHAR(36) / vehicle_id CHAR(32) */
+#define BIZ_KW_MAX          64      /* 关键字（车牌/自编号）最大长度 */
+#define BIZ_IDS_MAX         256     /* 单次按主键精确过滤的车辆数上限（对应 VMS_QUERY_MAX_IDS） */
+#define BIZ_PAGE_LIMIT_DEF  50u     /* 未指定 limit 时的默认页大小 */
+#define BIZ_PAGE_LIMIT_MAX  100u    /* 单页上限：受 Q_IPC_TLV_MAX(60000B) 约束 ——
+                                       一条车辆 JSON 约 480B，100 条约 48KB 已接近单帧上限，
+                                       再大会被 bizd 按 TLV 长度截断，客户端拿到残缺 JSON。 */
+
 /* ===================== 运行期配置 ===================== */
 typedef struct
 {
@@ -84,6 +97,11 @@ typedef struct
     uint32_t  offline;
     uint32_t  excluded;
     uint32_t  alarm_unhandled;
+
+    /* M3：d_vehicleinfo 桩规模（车辆总数 / 在线数 / 单页上限） */
+    uint32_t  vehicle_total;
+    uint32_t  vehicle_online;
+    uint32_t  page_limit_max;
 
     int       require_token;   /* 1=校验 token 非全零（默认开；0=放行，便于裸协议调试） */
     char      log_file[256];   /* 空 = 仅控制台 */
@@ -123,9 +141,34 @@ int      biz_set_io_timeout(q_fd_t fd, int sec);
 int      biz_send_frame(q_fd_t fd, const uint8_t *buf, size_t len);
 int      biz_recv_frame(q_fd_t fd, uint8_t *buf, size_t cap, size_t *outlen);
 
+/* ===================== M3：车辆查询过滤条件 =====================
+ * 由 params.biz_param（UTF-8 JSON 文本）解析而来；字段语义见《biz微服务接口约定.md》。
+ * 注意：org_id / vehicle_id 在库里是字符串主键（CHAR(36)/CHAR(32)），
+ *       **不是**整数 —— 这里一律按字符串比较，不做 atoi。 */
+typedef struct
+{
+    char     org_id[BIZ_ID_MAX];   /* 空串 = 全部；否则按该组织过滤 */
+    int      recursive;            /* 1=含所有下级组织（子树，默认）；0=仅本级直属车辆 */
+    char     keyword[BIZ_KW_MAX];  /* 车牌/自编号模糊匹配（UTF-8）；空串 = 不过滤 */
+    int      online_only;          /* 1=只要在线 */
+    int      alarm_only;           /* 1=只保留 alarm_flags & alarm_mask != 0 */
+    uint32_t alarm_mask;           /* 报警位掩码；0 时按"任一报警"处理 */
+    /* 按主键精确过滤（组织树上勾选若干车辆）；id_count==0 表示不过滤 */
+    char     ids[BIZ_IDS_MAX][BIZ_ID_MAX];
+    int      id_count;
+} biz_veh_filter_t;
+
 /* ===================== 业务处理（biz_handler.c） ===================== */
 /* 解析 bizd JSON 信封 -> 生成响应 JSON（调用方 free）；解析失败返回 NULL */
 char *biz_handle(struct biz_ctx *g, const char *req_json, size_t req_len);
+
+/* ===================== 桩数据（biz_stub.c） =====================
+ * 只生成 [offset, offset+limit) 这一段，total 始终回"过滤后的总行数"
+ * （客户端据此算页数）。items 由调用方创建并拥有。 */
+int biz_stub_orgs(cJSON *items, const char *parent_id, int recursive,
+                  uint32_t offset, uint32_t limit, uint32_t *total_out);
+int biz_stub_vehicles(cJSON *items, const biz_veh_filter_t *f,
+                      uint32_t offset, uint32_t limit, uint32_t *total_out);
 
 /* ===================== 服务器（biz_srv.c） ===================== */
 void biz_on_accept(q_fd_t fd, uint32_t events, void *ctx);
