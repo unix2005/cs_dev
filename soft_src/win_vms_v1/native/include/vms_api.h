@@ -40,9 +40,14 @@ extern "C" {
 #endif
 
 /* --------------------------------- 版本 ----------------------------------- */
-/* v3：新增 vms_credentials + vms_login/vms_logout/vms_heartbeat（M1 登录闭环）。
+/* v4：vms_company 追加 org_id、vms_vehicle 追加 vehicle_id/org_id（M3 业务列表）。
+   原因：d_org_info.org_id(CHAR(36)) / d_vehicleinfo.vehicle_id(CHAR(32)) 是**字符串主键**，
+        uint32 装不下（真实系统里可能是 UUID 或"车牌+颜色"），客户端内部的 uint32 id
+        只是 UI 序号；定位/视频等后续按主键检索的业务必须用字符串主键。
+   仍在尾部追加字段，不改动既有字段布局。
+   v3：新增 vms_credentials + vms_login/vms_logout/vms_heartbeat（M1 登录闭环）。
    仅在尾部追加函数与结构体，不改动既有结构布局。 */
-#define VMS_ABI_VERSION  3u
+#define VMS_ABI_VERSION  4u
 #define VMS_VER_MAJOR    1
 #define VMS_VER_MINOR    1
 #define VMS_VER_PATCH    0
@@ -66,6 +71,8 @@ typedef enum vms_status {
 #define VMS_TEXT_MAX      64   /* 通用短文本：公司名 / 位置 */
 #define VMS_TIME_MAX      24   /* "2026-10-16 10:03:49" */
 #define VMS_ISSUE_MAX     40   /* 报警类型名 */
+/* 库表字符串主键容量：d_org_info.org_id CHAR(36) / d_vehicleinfo.vehicle_id CHAR(32) */
+#define VMS_KEY_MAX       40
 
 /* -------------------------------- 结构体 ---------------------------------- */
 #pragma pack(push, 8)
@@ -101,6 +108,9 @@ typedef struct vms_company {
     uint32_t child_count;
     uint32_t reserved;
     char     name[VMS_TEXT_MAX];
+    /* v4：库表主键 d_org_info.org_id（字符串，可能是 UUID）。
+       UI 勾选/过滤仍用上面的 uint32 id；按主键向后台检索时用本字段。 */
+    char     org_id[VMS_KEY_MAX];
 } vms_company;
 
 /* 车辆一行（表格 + 地图打点共用）。
@@ -120,6 +130,10 @@ typedef struct vms_vehicle {
     char     location[VMS_TEXT_MAX];
     char     day[VMS_TIME_MAX];
     char     issue[VMS_ISSUE_MAX]; /* 报警类型（实时报警页用） */
+    /* v4：库表主键 d_vehicleinfo.vehicle_id 与归属组织 d_org_info.org_id。
+       后续按主键拉定位/视频时用它，不要用 uint32 id（那只是 UI 行号）。 */
+    char     vehicle_id[VMS_KEY_MAX];
+    char     org_id[VMS_KEY_MAX];
 } vms_vehicle;
 
 #define VMS_ALARM_NONE      0x0000u
@@ -132,7 +146,9 @@ typedef struct vms_vehicle {
 /* 单次查询最多按多少个车辆 ID 过滤（覆盖"在树上勾选一整页"的场景）。 */
 #define VMS_QUERY_MAX_IDS  256
 
-/* 查询条件：分页拉取，配合 ListView 增量加载，支持 3 万+ 车辆不卡 UI */
+/* 查询条件：分页拉取，配合 ListView 增量加载，支持 3 万+ 车辆不卡 UI。
+   注（M3）：company_id 仍是 uint32 UI 序号；native 内部会把它翻译成库表的
+   字符串 org_id 再发往后台（见 vms_company.org_id）。 */
 typedef struct vms_query {
     uint32_t company_id;   /* 0 = 全部；非 0 = 该组织**及其所有下级组织**（子树过滤） */
     uint32_t offset;
@@ -230,13 +246,23 @@ VMS_API int32_t VMS_CALL vms_heartbeat(vms_context* ctx);
  * 注意：本函数会阻塞做一次网络往返，调用方须放后台线程。 */
 VMS_API int32_t VMS_CALL vms_get_stats(vms_context* ctx, vms_stats* out_stats);
 
-/* 两次调用范式：cap=0 时只回填 *out_count = 总条数，返回 VMS_ERR_BUFFER_SMALL。
- * 缓冲区够则返回 VMS_OK，*out_count = 实际写入条数。 */
+/* 组织机构树（d_org_info）。
+ * 语义（M3 起）：**已登录**时向后台发一次 BIZ_QUERY(biz_type=companies) 拉全量并刷新缓存；
+ *               **未登录**时返回内置 Mock（让 UI 在无后端时仍可跑）。
+ *               已登录但查询失败时**不**回退 Mock（与 vms_get_stats 同一取舍）。
+ * 注意：本函数会阻塞做一次网络往返，调用方须放后台线程。 */
 VMS_API int32_t VMS_CALL vms_get_companies(const vms_context* ctx,
                                            vms_company* buf, size_t cap, size_t* out_count);
+
+/* 车辆分页查询（d_vehicleinfo + 定位/报警派生字段）。
+ * 语义（M3 起）：**已登录**时把 (company_id/keyword/online_only/alarm_only/alarm_mask/ids)
+ *               翻译成 biz_param JSON 发给后台，由后台完成过滤 + 分页；
+ *               *out_count 回填的是**过滤后的总行数**（不是本页条数）。
+ *               **未登录**时在本地 Mock 全量里过滤。
+ * 返回 VMS_OK 表示 buf 已装下全部命中行；VMS_ERR_BUFFER_SMALL 表示后面还有。
+ * 注意：本函数会阻塞做一次网络往返，调用方须放后台线程。 */
 VMS_API int32_t VMS_CALL vms_query_vehicles(const vms_context* ctx, const vms_query* q,
                                             vms_vehicle* buf, size_t cap, size_t* out_count);
-
 /* -------------------------------- 实时推送 -------------------------------- */
 VMS_API int32_t VMS_CALL vms_subscribe(vms_context* ctx, vms_push_cb cb, void* user_data);
 VMS_API int32_t VMS_CALL vms_unsubscribe(vms_context* ctx);

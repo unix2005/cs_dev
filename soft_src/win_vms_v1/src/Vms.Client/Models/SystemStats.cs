@@ -19,8 +19,12 @@ public sealed record SystemStats(
     public string AlarmUnhandledText => AlarmUnhandled.ToString("N0");
 }
 
-/// <summary>组织机构扁平记录（native 返回形态），由服务层装配成树。</summary>
-public readonly record struct CompanyRecord(uint Id, uint ParentId, uint Online, uint Count, string Name);
+/// <summary>
+/// 组织机构扁平记录（native 返回形态），由服务层装配成树。
+/// <paramref name="OrgId"/> 是库表 d_org_info.org_id 的字符串主键（可能是 UUID），
+/// 与 <see cref="Id"/>（UI 内部 uint32 序号）不是一回事：向后台检索组织/车辆时用 OrgId。
+/// </summary>
+public readonly record struct CompanyRecord(uint Id, uint ParentId, uint Online, uint Count, string Name, string OrgId = "");
 
 /// <summary>车辆列表查询条件（对应 <c>vms_query</c>）。</summary>
 public sealed class VehicleQuery

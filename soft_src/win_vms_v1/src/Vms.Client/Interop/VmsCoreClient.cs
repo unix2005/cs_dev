@@ -57,7 +57,7 @@ public sealed record LoginOptions(
 /// </summary>
 internal sealed unsafe class VmsCoreClient : IDisposable
 {
-    private const uint ExpectedAbiVersion = 3;   // v3：新增 vms_credentials + vms_login/logout/heartbeat
+    private const uint ExpectedAbiVersion = 4;   // v4：vms_company.org_id / vms_vehicle.vehicle_id+org_id（真实字符串主键）
 
     private readonly DispatcherQueue? _uiQueue;
     private GCHandle _selfHandle;
@@ -261,7 +261,8 @@ internal sealed unsafe class VmsCoreClient : IDisposable
                     node->ParentId,
                     node->Online,
                     node->Count,
-                    Utf8.Read(node->Name, NativeCompany.TextMax));
+                    Utf8.Read(node->Name, NativeCompany.TextMax),
+                    Utf8.Read(node->OrgId, NativeCompany.KeyMax));
             }
             return result;
         }
@@ -319,6 +320,8 @@ internal sealed unsafe class VmsCoreClient : IDisposable
     private static VehicleRow ToRow(NativeVehicle* v) => new()
     {
         Id = v->Id,
+        VehicleId = Utf8.Read(v->VehicleId, NativeVehicle.KeyMax),
+        OrgId = Utf8.Read(v->OrgId, NativeVehicle.KeyMax),
         SelfCode = Utf8.Read(v->SelfCode, NativeVehicle.CodeMax),
         Plate = Utf8.Read(v->Plate, NativeVehicle.PlateMax),
         Time = Utf8.Read(v->Time, NativeVehicle.TimeMax),

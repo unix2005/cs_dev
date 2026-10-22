@@ -65,6 +65,7 @@ internal struct NativeStats
 internal unsafe struct NativeCompany
 {
     public const int TextMax = 64;
+    public const int KeyMax = 40;     // VMS_KEY_MAX：d_org_info.org_id CHAR(36)
 
     public uint Id;
     public uint ParentId;
@@ -73,6 +74,7 @@ internal unsafe struct NativeCompany
     public uint ChildCount;
     public uint Reserved;
     public fixed byte Name[TextMax];
+    public fixed byte OrgId[KeyMax];  // v4：库表字符串主键（可能是 UUID）
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -83,6 +85,7 @@ internal unsafe struct NativeVehicle
     public const int TextMax = 64;
     public const int TimeMax = 24;
     public const int IssueMax = 40;
+    public const int KeyMax = 40;     // VMS_KEY_MAX
 
     public uint Id;
     public uint Online;
@@ -97,6 +100,9 @@ internal unsafe struct NativeVehicle
     public fixed byte Location[TextMax];
     public fixed byte Day[TimeMax];
     public fixed byte Issue[IssueMax];
+    // v4：库表字符串主键；后续按主键拉定位/视频时用这两个，不要用 uint Id（那只是 UI 行号）
+    public fixed byte VehicleId[KeyMax];
+    public fixed byte OrgId[KeyMax];
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]

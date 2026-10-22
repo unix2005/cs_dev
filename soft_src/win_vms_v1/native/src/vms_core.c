@@ -38,7 +38,9 @@
 #define VMS_MOCK_TOTAL_ONLINE    10846u
 #define VMS_MOCK_TOTAL_OFFLINE   23708u
 #define VMS_MOCK_ALARM_UNHANDLED 46343u
-#define VMS_MAX_COMPANY          64u
+/* 组织机构缓存上限：真实系统省级单位 + 地市级配送中心可到几百个，
+   64 会在拉全量建树时被截断，故抬到 512（512 * sizeof(vms_company) = 64KB，随 ctx 一次分配）。 */
+#define VMS_MAX_COMPANY          512u
 #define VMS_PUSH_INTERVAL_MS     800u
 #define VMS_PUSH_BATCH           24u
 
@@ -800,6 +802,371 @@ static int32_t vms_fetch_stats(struct vms_context* ctx)
     return (int32_t)rc;   /* 0 或下游结果码 */
 }
 
+/* ==================== M3：业务列表（companies / vehicles + cJSON） ====================
+ *
+ * 与 M2 的 stats 同一套约定：
+ *   - 已登录：走 qc_biz_query -> 下游 JSON（data 域字段 = 库表列名的 camelCase）；
+ *   - 失败**不**回退 Mock（宁可让 UI 报错，也不能给运维看假数字）；
+ *   - 未登录：仍走内置 Mock，保证无后端时 UI 可跑。
+ *
+ * 字段映射见《biz微服务接口约定.md》，这里只做"列名 -> 结构体字段"的搬运，
+ * 不做任何业务聚合（聚合是下游微服务的事）。
+ */
+
+/* 单帧 BIZ 响应上限：TLV val 上限 60000（Q_IPC_TLV_MAX）+ RESULT TLV 余量 */
+#define VMS_BIZ_BUF_MAX   (60000u + 256u)
+
+/* 一次业务响应 JSON 的打开结果：root 持有所有权，data/items 是借用指针 */
+typedef struct
+{
+    cJSON *root;
+    cJSON *data;
+    cJSON *items;
+} vms_json_t;
+
+static void vms_json_close(vms_json_t *j)
+{
+    if (!j) return;
+    if (j->root) cJSON_Delete(j->root);
+    j->root = NULL; j->data = NULL; j->items = NULL;
+}
+
+/* 打开下游响应：0=成功；>0=下游结果码；<0=本地解析错误（错误串已 set_error） */
+static int vms_json_open(const char *json, vms_json_t *j)
+{
+    cJSON *root, *r, *data;
+
+    memset(j, 0, sizeof(*j));
+    root = cJSON_Parse(json);
+    if (!root) { set_error("业务响应 JSON 解析失败", VMS_ERR_INTERNAL); return -1; }
+    j->root = root;
+
+    /* 下游 result：bizd 通用转发只回"转发成功"，真实业务结果在下游 JSON 里 */
+    r = cJSON_GetObjectItem(root, "result");
+    if (r && cJSON_IsNumber(r) && (int)r->valuedouble != 0)
+    {
+        int rc = (int)r->valuedouble;
+        const char *msg = "";
+        cJSON *m = cJSON_GetObjectItem(root, "message");
+        if (m && cJSON_IsString(m) && m->valuestring) msg = m->valuestring;
+        snprintf(g_last_error, sizeof(g_last_error), "业务查询被拒绝：结果码 %d %s", rc, msg);
+        return rc > 0 ? rc : -1;
+    }
+
+    data = cJSON_GetObjectItem(root, "data");
+    if (!data || !cJSON_IsObject(data))
+    {
+        set_error("业务响应缺少 data 段", VMS_ERR_INTERNAL);
+        return -1;
+    }
+    j->data  = data;
+    j->items = cJSON_GetObjectItem(data, "items");
+    return 0;
+}
+
+static const char *js_str(const cJSON *o, const char *k)
+{
+    cJSON *v = o ? cJSON_GetObjectItem(o, k) : NULL;
+    return (v && cJSON_IsString(v) && v->valuestring) ? v->valuestring : NULL;
+}
+
+static double js_num(const cJSON *o, const char *k, double def)
+{
+    cJSON *v = o ? cJSON_GetObjectItem(o, k) : NULL;
+    return (v && cJSON_IsNumber(v)) ? v->valuedouble : def;
+}
+
+static void copy_str(char *dst, size_t cap, const char *src)
+{
+    if (!src) { dst[0] = '\0'; return; }
+    snprintf(dst, cap, "%s", src);
+}
+
+/* 字符串主键 -> uint32 UI 序号：纯数字串直接转；非数字（UUID / "车牌+颜色"）用 fallback 行号。
+   注：真实系统若主键不是数字，UI 勾选应改用字符串主键（vms_vehicle.vehicle_id）。 */
+static uint32_t key_id(const char *key, uint32_t fallback)
+{
+    const char *p;
+    uint32_t    v = 0u;
+
+    if (!key || !key[0]) return fallback;
+    for (p = key; *p; p++)
+    {
+        if (*p < '0' || *p > '9') return fallback;
+        v = v * 10u + (uint32_t)(*p - '0');
+    }
+    return v;
+}
+
+/* company_id(uint32 序号) -> 库表字符串 org_id（用于向后台发过滤条件） */
+static const char *org_id_of(const struct vms_context *ctx, uint32_t company_id)
+{
+    size_t i;
+    for (i = 0; i < ctx->company_count; ++i)
+        if (ctx->companies[i].id == company_id)
+            return ctx->companies[i].org_id;
+    return NULL;
+}
+
+/* 发一次 BIZ_QUERY 并取回下游 JSON 原文（malloc，调用方 free）；
+   失败返回 NULL，*out_rc 为本地错误码（<0）或服务端结果码（>0） */
+static char *vms_biz_call(struct vms_context *ctx, const char *biz_type,
+                          const char *param_json, uint32_t offset, uint32_t limit,
+                          int32_t *out_rc)
+{
+    uint8_t      *resp;
+    size_t        rlen = 0u;
+    uint16_t      blen = 0u;
+    const uint8_t *body;
+    char         *json;
+    int           rc;
+
+    *out_rc = VMS_OK;
+    resp = (uint8_t *)malloc(VMS_BIZ_BUF_MAX);
+    if (!resp) { set_error("内存不足", VMS_ERR_NO_MEMORY); *out_rc = VMS_ERR_NO_MEMORY; return NULL; }
+
+    rc = qc_biz_query(ctx->sess, biz_type, param_json, offset, limit,
+                      resp, VMS_BIZ_BUF_MAX, &rlen);
+    if (rc < 0)
+    {
+        free(resp);
+        set_error("业务查询失败：连接中断", VMS_ERR_NOT_CONNECTED);
+        *out_rc = VMS_ERR_NOT_CONNECTED;
+        return NULL;
+    }
+    if (rc > 0)
+    {
+        free(resp);
+        snprintf(g_last_error, sizeof(g_last_error), "业务查询被拒绝：结果码 %d", rc);
+        *out_rc = (int32_t)rc;
+        return NULL;
+    }
+
+    body = vms_tlv_find(resp, rlen, Q_IPC_T_BODY, &blen);
+    if (!body || blen == 0u)
+    {
+        free(resp);
+        set_error("业务响应缺少 BODY", VMS_ERR_INTERNAL);
+        *out_rc = VMS_ERR_INTERNAL;
+        return NULL;
+    }
+    json = (char *)malloc((size_t)blen + 1u);
+    if (!json) { free(resp); set_error("内存不足", VMS_ERR_NO_MEMORY); *out_rc = VMS_ERR_NO_MEMORY; return NULL; }
+    memcpy(json, body, blen);
+    json[blen] = '\0';
+    free(resp);
+    return json;
+}
+
+/* 拉全量组织机构（不分页：组织树要一次建好）并刷新 ctx->companies */
+static int32_t vms_fetch_companies(struct vms_context *ctx)
+{
+    char      *json;
+    int32_t    rc = VMS_OK;
+    int        r;
+    vms_json_t j;
+    size_t     i, n;
+
+    json = vms_biz_call(ctx, "companies", NULL, 0u, 0u, &rc);
+    if (!json) return rc;
+    r = vms_json_open(json, &j);
+    free(json);
+    if (r != 0)
+    {
+        vms_json_close(&j);
+        return (r > 0) ? (int32_t)r : VMS_ERR_INTERNAL;
+    }
+    if (!j.items || !cJSON_IsArray(j.items))
+    {
+        vms_json_close(&j);
+        set_error("companies 响应缺少 items 数组", VMS_ERR_INTERNAL);
+        return VMS_ERR_INTERNAL;
+    }
+
+    n = (size_t)cJSON_GetArraySize(j.items);
+    if (n > VMS_MAX_COMPANY) n = VMS_MAX_COMPANY;
+
+    memset(ctx->companies, 0, sizeof(ctx->companies));
+    for (i = 0; i < n; ++i)
+    {
+        cJSON       *it    = cJSON_GetArrayItem(j.items, (int)i);
+        vms_company *c     = &ctx->companies[i];
+        const char  *oid   = js_str(it, "orgId");
+        const char  *pid   = js_str(it, "parentOrgId");
+        const char  *sname = js_str(it, "orgShortName");
+        const char  *lname = js_str(it, "orgLongName");
+
+        if (!it) break;
+        copy_str(c->org_id, sizeof(c->org_id), oid);
+        c->id = key_id(oid, (uint32_t)(i + 1u));
+        /* d_org_info 约定：根节点 parent_org_id = "-1"；统一映射成 0（= 无父级） */
+        c->parent_id    = (!pid || !pid[0] || strcmp(pid, "-1") == 0) ? 0u : key_id(pid, 0u);
+        copy_str(c->name, sizeof(c->name),
+                 (sname && sname[0]) ? sname : ((lname && lname[0]) ? lname : ""));
+        c->count       = (uint32_t)js_num(it, "vehicleCount", 0.0);
+        c->online      = (uint32_t)js_num(it, "onlineCount", 0.0);
+        c->child_count = (uint32_t)js_num(it, "childCount", 0.0);
+    }
+    ctx->company_count = n;
+
+    /* 服务端没给 childCount 时按 parent 关系补算（树控件依赖它判断叶子） */
+    for (i = 0; i < ctx->company_count; ++i)
+    {
+        size_t k;
+        uint32_t child = 0u;
+        if (ctx->companies[i].child_count) continue;
+        for (k = 0; k < ctx->company_count; ++k)
+            if (ctx->companies[k].parent_id == ctx->companies[i].id) ++child;
+        ctx->companies[i].child_count = child;
+    }
+
+    vms_json_close(&j);
+    return VMS_OK;
+}
+
+/* 构造 vehicles 的 biz_param JSON（malloc，调用方 free） */
+static char *vms_build_veh_param(const struct vms_context *ctx, const vms_query *q)
+{
+    cJSON *o = cJSON_CreateObject();
+    char  *s;
+
+    if (!o) return NULL;
+
+    if (q && q->company_id)
+    {
+        const char *oid = org_id_of(ctx, q->company_id);
+        if (oid && oid[0])
+            cJSON_AddStringToObject(o, "org_id", oid);
+    }
+    cJSON_AddNumberToObject(o, "recursive", 1);   /* 按组织过滤 = 该组织及其所有下级 */
+    if (q && q->keyword[0])
+        cJSON_AddStringToObject(o, "keyword", q->keyword);
+    if (q && q->online_only)
+        cJSON_AddNumberToObject(o, "online_only", 1);
+    if (q && q->alarm_only)
+    {
+        cJSON_AddNumberToObject(o, "alarm_only", 1);
+        cJSON_AddNumberToObject(o, "alarm_mask",
+                                (double)(q->alarm_mask ? q->alarm_mask : 0xFFFFFFFFu));
+    }
+    if (q && q->id_count)
+    {
+        cJSON *arr = cJSON_CreateArray();
+        uint32_t k;
+        char     vid[24];
+        if (arr)
+        {
+            /* ids 是 uint32 UI 序号；服务端按字符串主键比对，桩服务的主键规则是 "%06u"。
+               真实系统主键非数字时，应改传 vms_vehicle.vehicle_id（ABI v5 待办）。 */
+            for (k = 0; k < q->id_count && k < VMS_QUERY_MAX_IDS; ++k)
+            {
+                snprintf(vid, sizeof(vid), "%06u", q->ids[k]);
+                cJSON_AddItemToArray(arr, cJSON_CreateString(vid));
+            }
+            cJSON_AddItemToObject(o, "ids", arr);
+        }
+    }
+
+    s = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    return s;
+}
+
+/* 一条车辆 JSON -> vms_vehicle */
+static void vms_vehicle_from_json(vms_vehicle *v, const cJSON *it, size_t row)
+{
+    const char *s;
+
+    memset(v, 0, sizeof(*v));
+
+    s = js_str(it, "vehicleId");
+    copy_str(v->vehicle_id, sizeof(v->vehicle_id), s);
+    v->id = key_id(s, (uint32_t)(row + 1u));
+
+    s = js_str(it, "orgId");
+    copy_str(v->org_id, sizeof(v->org_id), s);
+
+    /* 自编号：user_defined_code 优先（UI 语义），空则退到 erp_code，再空用主键 */
+    s = js_str(it, "userDefinedCode");
+    if (!s || !s[0]) s = js_str(it, "erpCode");
+    copy_str(v->self_code, sizeof(v->self_code), s && s[0] ? s : v->vehicle_id);
+
+    copy_str(v->plate, sizeof(v->plate), js_str(it, "lisPlate"));
+
+    /* 时间：扩展字段 lastTime（定位时间）-> time / day */
+    s = js_str(it, "lastTime");
+    copy_str(v->time, sizeof(v->time), s);
+    if (s && strlen(s) >= 10u)
+    {
+        memcpy(v->day, s, 10u);
+        v->day[10] = '\0';
+    }
+    copy_str(v->location, sizeof(v->location), js_str(it, "location"));
+    copy_str(v->issue,    sizeof(v->issue),    js_str(it, "alarmText"));
+
+    v->online          = (uint32_t)js_num(it, "online", 0.0);
+    v->offline_seconds = (uint32_t)js_num(it, "offlineSeconds", 0.0);
+    v->alarm_flags     = (uint32_t)js_num(it, "alarmFlags", 0.0);
+    v->speed_kph       = (float)js_num(it, "speedKph", 0.0);
+    v->lon             = js_num(it, "lon", 0.0);
+    v->lat             = js_num(it, "lat", 0.0);
+}
+
+/* 拉一页车辆：total 进 *out_count，命中行写 buf（最多 cap 条） */
+static int32_t vms_fetch_vehicles(struct vms_context *ctx, const vms_query *q,
+                                  vms_vehicle *buf, size_t cap, size_t *out_count)
+{
+    char      *param, *json;
+    int32_t    rc = VMS_OK;
+    int        r;
+    vms_json_t j;
+    uint32_t   offset, limit, total;
+    size_t     i, n, written = 0u;
+
+    offset = q ? q->offset : 0u;
+    limit  = (q && q->limit) ? q->limit : (uint32_t)(cap ? cap : 50u);
+    if (limit == 0u)  limit = 50u;
+    /* 单页上限 100：服务端与本机都有同样的约束（一条车辆 JSON 约 480B，
+       超过 100 条会撞上 Q_IPC_TLV_MAX=60000，响应被截断成非法 JSON）。 */
+    if (limit > 100u) limit = 100u;
+
+    param = vms_build_veh_param(ctx, q);
+    if (!param) { set_error("内存不足", VMS_ERR_NO_MEMORY); return VMS_ERR_NO_MEMORY; }
+    json = vms_biz_call(ctx, "vehicles", param, offset, limit, &rc);
+    free(param);
+    if (!json) return rc;
+
+    r = vms_json_open(json, &j);
+    free(json);
+    if (r != 0)
+    {
+        vms_json_close(&j);
+        return (r > 0) ? (int32_t)r : VMS_ERR_INTERNAL;
+    }
+
+    total = (uint32_t)js_num(j.data, "total", 0.0);
+    if (j.items && cJSON_IsArray(j.items))
+    {
+        n = (size_t)cJSON_GetArraySize(j.items);
+        for (i = 0; i < n && written < cap; ++i)
+        {
+            cJSON *it = cJSON_GetArrayItem(j.items, (int)i);
+            if (!it) break;
+            vms_vehicle_from_json(&buf[written], it, offset + written);
+            ++written;
+        }
+    }
+    vms_json_close(&j);
+
+    *out_count = (size_t)total;
+    /* 还有剩余（buf 装不下或本页之后还有）-> 沿用既有约定：BUFFER_SMALL */
+    if (written < cap && (size_t)total > (size_t)offset + written)
+        return VMS_ERR_BUFFER_SMALL;
+    if (written >= cap && (size_t)total > (size_t)offset + written)
+        return VMS_ERR_BUFFER_SMALL;
+    return VMS_OK;
+}
+
 int32_t VMS_CALL vms_get_stats(vms_context* ctx, vms_stats* out_stats)
 {
     if (!ctx || !out_stats) return VMS_ERR_INVALID_ARG;
@@ -817,6 +1184,14 @@ int32_t VMS_CALL vms_get_stats(vms_context* ctx, vms_stats* out_stats)
 int32_t VMS_CALL vms_get_companies(const vms_context* ctx, vms_company* buf, size_t cap, size_t* out_count)
 {
     if (!ctx || !out_count) return VMS_ERR_INVALID_ARG;
+
+    /* 已登录：向后台拉全量组织树（失败即报错，不回退 Mock） */
+    if (ctx->logged_in && ctx->sess)
+    {
+        int32_t rc = vms_fetch_companies((struct vms_context*)ctx);
+        if (rc != VMS_OK) return rc;
+    }
+
     *out_count = ctx->company_count;
     if (!buf || cap < ctx->company_count) return VMS_ERR_BUFFER_SMALL;
     memcpy(buf, ctx->companies, ctx->company_count * sizeof(vms_company));
@@ -872,6 +1247,25 @@ int32_t VMS_CALL vms_query_vehicles(const vms_context* ctx, const vms_query* q,
     size_t idx, matched = 0, written = 0;
     if (!ctx || !out_count) return VMS_ERR_INVALID_ARG;
     if (q && q->limit == 0) return VMS_ERR_INVALID_ARG;
+
+    /* 已登录：交给后台做过滤 + 分页（本地只搬数据）；
+       组织过滤需要 uint32 序号 -> 库表字符串 org_id 的映射，故先确保组织树已加载。 */
+    if (ctx->logged_in && ctx->sess)
+    {
+        struct vms_context* m = (struct vms_context*)ctx;
+        if (m->company_count == 0)
+        {
+            int32_t rc = vms_fetch_companies(m);
+            if (rc != VMS_OK) return rc;
+        }
+        if (!buf || cap == 0)
+        {
+            /* 仅探测条数：limit 取 1，只取 total */
+            vms_vehicle probe;
+            return vms_fetch_vehicles(m, q, &probe, 1u, out_count);
+        }
+        return vms_fetch_vehicles(m, q, buf, cap, out_count);
+    }
 
     for (idx = 0; idx < ctx->vehicle_count; ++idx) {
         if (q && !vehicle_match(ctx, idx, q)) continue;

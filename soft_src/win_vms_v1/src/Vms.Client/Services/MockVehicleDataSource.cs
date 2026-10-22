@@ -110,7 +110,8 @@ internal sealed class MockVehicleDataSource : IVehicleDataSource
 
     public Task<IReadOnlyList<CompanyRecord>> GetCompaniesAsync(CancellationToken ct = default)
         => Task.FromResult<IReadOnlyList<CompanyRecord>>(
-            [.. Seed.Select(s => new CompanyRecord(s.Id, s.Parent, s.Online, s.Count, s.Name))]);
+            // OrgId：Mock 也带上字符串主键（= 序号的字符串形式），让 UI 逻辑与真实数据源同形
+            [.. Seed.Select(s => new CompanyRecord(s.Id, s.Parent, s.Online, s.Count, s.Name, s.Id.ToString()))]);
 
     public Task<(IReadOnlyList<VehicleRow> Rows, int Total)> QueryAsync(VehicleQuery query, CancellationToken ct = default)
         => Task.Run<(IReadOnlyList<VehicleRow>, int)>(() =>

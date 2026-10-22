@@ -22,6 +22,12 @@ public sealed class VehicleRow : ObservableObject
 
     public uint Id { get; init; }
 
+    /// <summary>库表 d_vehicleinfo.vehicle_id（字符串主键）。按主键拉定位/视频时用它。</summary>
+    public string VehicleId { get; init; } = string.Empty;
+
+    /// <summary>库表 d_vehicleinfo.org_id（归属组织的字符串主键）。</summary>
+    public string OrgId { get; init; } = string.Empty;
+
     public string SelfCode { get => _selfCode; set => SetProperty(ref _selfCode, value); }
     public string Plate { get => _plate; set => SetProperty(ref _plate, value); }
     public string Time { get => _time; set => SetProperty(ref _time, value); }
