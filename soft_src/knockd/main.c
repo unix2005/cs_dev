@@ -40,6 +40,7 @@ static q_reactor_t *g_reactor = NULL;
 static int g_sock = -1;       /* IPv4 监听 fd */
 static int g_sock6 = -1;      /* IPv6 监听 fd（-1 表示未启用） */
 static struct nft_ctx *g_nft = NULL;  /* libnftables 上下文（懒初始化，进程退出时释放） */
+static int g_nft_disabled = 0;        /* netlink 不可用/运维禁用：降级为「仅审计、不开门」 */
 static knock_ctx_t g_ctx4 = { NULL };
 static knock_ctx_t g_ctx6 = { NULL };
 
@@ -135,23 +136,63 @@ static int load_config(const char *path)
     return 0;
 }
 
+/* netlink 可用性探测：可用返回 0；不可用返回 -1（errno 有意义）。
+   必须在调用任何 libnftables 接口**之前**做：库内部打开 netlink 失败时不会返回错误码，
+   而是直接终止进程（受限内核下实测 SIGQUIT，进程无声消失）。对「收包即处理」的 SPA 服务
+   而言，等于一个 UDP 包就能打挂安全基线第一道进程 —— 绝不能先调再试。 */
+static int netlink_usable(void)
+{
+    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);
+    if (fd < 0)
+        return -1;
+    close(fd);
+    return 0;
+}
+
 /* 校验通过：将源 IP 加入对应 nftables 放行集合（带 timeout 自动过期）。
    直连 libnftables（netlink），不经过 /bin/sh，从结构上杜绝命令注入、
    省去 fork+sh 开销，且能拿到结构化返回码。set 由调用方按地址族传入
-   （v4->allow4 / v6->allow6）。 */
+   （v4->allow4 / v6->allow6）。
+
+   降级语义：netlink 不可用（无 CAP_NET_ADMIN / 内核未开 nfnetlink / WSL）或运维设
+   KNOCKD_NO_NFT 时，只记审计、不实际开门 —— 进程必须继续存活，
+   否则「敲门成功但门没开」会退化成「敲门把门卫敲死了」。 */
 static void open_door(const char *set, const char *ip, unsigned ttl_s)
 {
-    if (!g_nft)
-        g_nft = nft_ctx_new();
+    if (g_nft_disabled)
+    {
+        QLOG_WARN(g_log, "nft 已降级：本次不开门 ip=%s（仅记审计）", ip);
+        return;
+    }
     if (!g_nft)
     {
-        QLOG_ERROR(g_log, "nftables 上下文创建失败（系统缺少 libq.../libnftables.so.1）");
+        if (netlink_usable() != 0)
+        {
+            g_nft_disabled = 1;
+            QLOG_ERROR(g_log, "netlink(NETLINK_NETFILTER) 不可用: %s —— 降级为仅审计、不开门"
+                              "（需 CAP_NET_ADMIN 且内核支持 nfnetlink）", strerror(errno));
+            return;
+        }
+        g_nft = nft_ctx_new(0);   /* flags=0：默认行为（旧版 nft_ctx_new(void) 忽略此实参） */
+    }
+    if (!g_nft)
+    {
+        QLOG_ERROR(g_log, "nftables 上下文创建失败（系统缺少 libnftables.so.1）");
         return;
     }
     char buf[256];
-    snprintf(buf, sizeof(buf), "add element %s %s { %s timeout %us }",
-             g_cfg.nft_table, set, ip, ttl_s);
-    if (nft_run_cmd_from_buffer(g_nft, buf) != 0)
+    int n = snprintf(buf, sizeof(buf), "add element %s %s { %s timeout %us }",
+                     g_cfg.nft_table, set, ip, ttl_s);
+    if (n <= 0 || (size_t)n >= sizeof(buf))
+    {
+        QLOG_ERROR(g_log, "nft 命令拼装异常（表/集合名过长）: %s/%s", g_cfg.nft_table, set);
+        return;
+    }
+    /* 必须显式传 buflen：nftables >= 1.0.0 的 nft_run_cmd_from_buffer 是三参数
+       (ctx, buf, buflen)。少传则第三实参取 rdx 垃圾值当长度，内部按其解析越界，
+       表现为「收到合法 SPA 包即段错误」—— 等于任何持合法包的来源都能打挂本进程。
+       旧版(0.9.x)为两参数，多传一个实参被忽略，故此处写法对两版都安全。 */
+    if (nft_run_cmd_from_buffer(g_nft, buf, (size_t)n) != 0)
         QLOG_ERROR(g_log, "nft 开门失败: %s (需 CAP_NET_ADMIN 且 %s/%s 已预创建)",
                    ip, g_cfg.nft_table, set);
 }
@@ -422,6 +463,14 @@ int main(int argc, char *argv[])
         QLOG_WARN(g_log, "KNOCKD_NO_SECCOMP 已设置：跳过 seccomp 安装（仅排障用，生产禁止）");
     else
         (void)daemon_seccomp_apply(SECCOMP_PROFILE_KNOCKD);
+
+    /* KNOCKD_NO_NFT：只验签记审计、不做 nft 开门（无 nftables 的联调环境用）。
+       注意 netlink 不可用时 open_door 会**自动**降级，本开关用于「明明可用但我不想改防火墙」。 */
+    if (getenv("KNOCKD_NO_NFT") != NULL)
+    {
+        g_nft_disabled = 1;
+        QLOG_WARN(g_log, "KNOCKD_NO_NFT 已设置：不做 nft 开门，仅记审计（仅联调用，生产禁止）");
+    }
 
     /* 事件循环：收到 SIGINT/SIGTERM 后 daemon_should_stop() 置位即退出 */
     while (!daemon_should_stop())

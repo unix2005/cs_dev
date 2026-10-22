@@ -134,7 +134,10 @@ if [ "$KNOCK" = "1" ]; then
     SPA_KEY="${SPA_KEY:-$CONF_DIR/spa.key}"
     KNOCK_PORT="${KNOCK_PORT:-5001}"
     [ -f "$SPA_KEY" ] || die "缺少 SPA 密钥 $SPA_KEY（KNOCK=1 需要）"
-    "$SOFT_HOME/bin/q_service_knockd" -c "$CONF_DIR/knockd_conf.xml" \
+    # KNOCKD_NO_NFT=1：WSL 内核无 NETLINK_NETFILTER，让 knockd 走「只验签记审计、不开门」的
+    # 降级路径。UDP 收包与 SPA 校验照常，足以证明重建时确实重发了格式正确的 SPA 包。
+    # （不设也行：open_door 探测到 netlink 不可用会自动降级；显式设是为了日志更干净。）
+    KNOCKD_NO_NFT=1 "$SOFT_HOME/bin/q_service_knockd" -c "$CONF_DIR/knockd_conf.xml" \
             >"$CONF_DIR/knockd.log" 2>&1 &
     PIDS="$PIDS $!"
     sleep 0.5
@@ -171,15 +174,19 @@ rc_ut=${PIPESTATUS[0]}
 # 否则 knockd 一崩、grep 命中启动行就会给出假 [OK]。
 if [ "$KNOCK" = "1" ]; then
     log "敲门验证（重建连接时应重新发 SPA 包）"
-    if ! pgrep -x q_service_knockd >/dev/null 2>&1; then
-        printf '\033[33m[--]\033[0m knockd 进程已不在（WSL 无 CAP_NET_ADMIN/nftables，会崩于事件循环），'
-        printf '本环境无法验证敲门路径；代码路径见 qc_keeper_rebuild() -> qc_knock()\n'
-        tail -3 "$CONF_DIR/knockd.log" 2>/dev/null
+    # 存活判定不能用 pgrep -x：Linux /proc/pid/comm 截断到 15 字符，
+    # "q_service_knockd"(16) 会被截成 "q_service_knock"，-x 永远匹配不上 → 假阴性，
+    # 曾据此误判「knockd 一进事件循环就崩」。用 ps 全命令行匹配。
+    if ! ps -ef | grep "[q]_service_knockd" >/dev/null 2>&1; then
+        printf '\033[31m[FAIL]\033[0m knockd 进程已不在 —— SPA 敲门路径未通过验证\n'
+        tail -5 "$CONF_DIR/knockd.log" 2>/dev/null
     else
-        n=$(grep -cE '放行|SPA 校验|cid=|allow' "$CONF_DIR/knockd.log" 2>/dev/null || echo 0)
+        # 只看**收包**相关日志：授权成功(AUDIT)或校验失败都算"包到了且格式正确"，
+        # 启动行的 "knockd start" 不算证据。
+        n=$(grep -cE 'SPA 授权成功|SPA 校验失败' "$CONF_DIR/knockd.log" 2>/dev/null || echo 0)
         if [ "${n:-0}" -gt 0 ]; then
             printf '\033[32m[OK]\033[0m knockd 收到 %s 条 SPA 记录：重建连接时确已重新敲门\n' "$n"
-            grep -E '放行|SPA 校验|cid=' "$CONF_DIR/knockd.log" | tail -4
+            grep -E 'SPA 授权成功|SPA 校验失败' "$CONF_DIR/knockd.log" | tail -4
         else
             printf '\033[33m[--]\033[0m knockd 存活但无收包记录：确认用例是否真的触发了重建（需跑用例3）\n'
         fi

@@ -11,8 +11,10 @@ SOFT_INCL = .
 # q_spa 传递依赖：q_crypto 国密基于 Tongsuo；
 # 本项目 q_* 库一律静态链入（避免依赖动态 libqcrypto.so 缺失 Tongsuo 符号），
 # Tongsuo 仅在最终 exe 链接期引入（与 knockd 同约定）。
+# 依赖根走 DEP_HOME（与 knockd/Makefile 一致）：交叉编译时用
+# `make LIB=<dir> DEP_HOME=<dir>` 覆盖，否则三端产物会互相覆盖。
 QLIBS = $(call ld_group, \
         $(LIB)/libqspa.a $(LIB)/libqcrypto.a $(LIB)/libqrand.a $(LIB)/libqmem.a $(LIB)/libqlog.a)
-LIBS  = $(QLIBS) -L$(SOFT_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(SOFT_HOME)/tongsuo/lib64
+LIBS  = $(QLIBS) -L$(DEP_HOME)/tongsuo/lib64 $(LIB_CRYPTO) -Wl,-rpath,$(DEP_HOME)/tongsuo/lib64
 
 include ../../../include/Makefile.inc

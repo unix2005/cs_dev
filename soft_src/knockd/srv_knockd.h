@@ -14,6 +14,7 @@ extern "C" {
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <linux/netlink.h>      /* NETLINK_NETFILTER：开门前探测 netlink 可用性 */
 
 #include "q_common.h"
 #include "q_reactor.h"
