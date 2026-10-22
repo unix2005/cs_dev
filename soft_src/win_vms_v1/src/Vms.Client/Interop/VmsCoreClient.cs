@@ -57,7 +57,7 @@ public sealed record LoginOptions(
 /// </summary>
 internal sealed unsafe class VmsCoreClient : IDisposable
 {
-    private const uint ExpectedAbiVersion = 4;   // v4：vms_company.org_id / vms_vehicle.vehicle_id+org_id（真实字符串主键）
+    private const uint ExpectedAbiVersion = 5;   // v5：vms_query.ids 改字符串主键 + 新增 org_id（真实字符串主键）
 
     private readonly DispatcherQueue? _uiQueue;
     private GCHandle _selfHandle;
@@ -291,12 +291,16 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             AlarmMask = query.AlarmMask,
         };
         Utf8.Write(native.Keyword, NativeVehicle.TextMax, query.Keyword);
+        Utf8.Write(native.OrgId, NativeVehicle.KeyMax, query.OrgId);
 
-        // v2：按车辆 ID 精确过滤（树上勾选的车辆）。id_count==0 时 native 端不过滤。
+        // ids 精确过滤。v5：元素是「库表主键字符串」d_vehicleinfo.vehicle_id（车牌+颜色），
+        // 直接拷 VehicleRow.VehicleId 即可；id_count==0 时 native 端不过滤。
+        // 注意：native 是栈上局部变量，fixed buffer 直接退化为 byte*，不能再套 fixed（CS0213）。
         var ids = query.Ids;
         int n = ids.Count < NativeQuery.QueryMaxIds ? ids.Count : NativeQuery.QueryMaxIds;
+        byte* slot = native.Ids;
         for (var i = 0; i < n; i++)
-            native.Ids[i] = ids[i];
+            Utf8.Write(slot + i * NativeVehicle.KeyMax, NativeVehicle.KeyMax, ids[i]);
         native.IdCount = (uint)n;
 
         var buffer = new NativeVehicle[query.Limit];

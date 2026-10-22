@@ -24,7 +24,7 @@ import os
 import sys
 
 # ----------------------------- ABI 常量（必须与 vms_api.h 一致） -----------------------------
-VMS_ABI_VERSION = 4
+VMS_ABI_VERSION = 5
 
 VMS_CODE_MAX = 24
 VMS_PLATE_MAX = 16
@@ -38,7 +38,7 @@ VMS_PASS_MAX = 64
 VMS_OTP_MAX = 16
 VMS_DEVID_HEX_MAX = 65
 VMS_PATH_MAX = 260
-VMS_QUERY_MAX_IDS = 256
+VMS_QUERY_MAX_IDS = 128   # v5：256 -> 128（元素从 4B 涨到 40B，否则 vms_query 会到 10KB）
 
 
 class VmsStats(ctypes.Structure):
@@ -100,8 +100,10 @@ class VmsQuery(ctypes.Structure):
         ("alarm_mask", ctypes.c_uint32),
         ("reserved", ctypes.c_uint32),
         ("keyword", ctypes.c_char * VMS_TEXT_MAX),
-        ("ids", ctypes.c_uint32 * VMS_QUERY_MAX_IDS),
+        # v5：元素由 uint32 行号改为「库表主键字符串」d_vehicleinfo.vehicle_id（车牌+颜色）
+        ("ids", (ctypes.c_char * VMS_KEY_MAX) * VMS_QUERY_MAX_IDS),
         ("id_count", ctypes.c_uint32),
+        ("org_id", ctypes.c_char * VMS_KEY_MAX),      # v5：组织子树根，非空时优先于 company_id
     ]
 
 
@@ -142,7 +144,9 @@ def main():
     ap.add_argument("--pass", dest="password", default="123456")
     ap.add_argument("--pub", required=True, help="服务端 SM2 公钥 DER 路径")
     ap.add_argument("--devid-hex", default="")
-    ap.add_argument("--org-id", type=int, default=0, help="按组织过滤（0=全部）")
+    ap.add_argument("--org-id", type=int, default=0, help="按组织过滤（uint32 序号，0=全部）")
+    ap.add_argument("--org-key", default="", help="v5：按库表主键 org_id 过滤（非空时优先于 --org-id）")
+    ap.add_argument("--ids", default="", help="v5：逗号分隔的 vehicle_id 列表，按主键精确过滤")
     ap.add_argument("--keyword", default="")
     ap.add_argument("--limit", type=int, default=5)
     ap.add_argument("--offset", type=int, default=0)
@@ -227,6 +231,18 @@ def main():
         q.alarm_mask = 0xFFFF
         if args.keyword:
             q.keyword = args.keyword.encode()
+        if args.org_key:
+            q.org_id = args.org_key.encode()      # v5：直接给库表主键，跳过序号翻译
+        if args.ids:
+            id_list = [x.strip() for x in args.ids.split(",") if x.strip()]
+            if len(id_list) > VMS_QUERY_MAX_IDS:
+                print(f"!! ids 超过上限 {VMS_QUERY_MAX_IDS}，截断", file=sys.stderr)
+                id_list = id_list[:VMS_QUERY_MAX_IDS]
+            for i, vid in enumerate(id_list):
+                raw = vid.encode()[: VMS_KEY_MAX - 1]
+                q.ids[i] = (ctypes.c_char * VMS_KEY_MAX)(*raw)   # 结构体已零初始化，余下自动补 NUL
+            q.id_count = len(id_list)
+            print(f"  按主键精确过滤 {q.id_count} 台: {id_list[:5]}{'...' if len(id_list) > 5 else ''}")
 
         rows = (VmsVehicle * (args.limit or 50))()
         matched = ctypes.c_size_t(0)

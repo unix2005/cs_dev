@@ -217,6 +217,12 @@ static void seed_vehicle(vms_vehicle* v, uint32_t idx, uint64_t* rs)
              k_plate_prefix[rnd_range(rs, 0, (uint32_t)(sizeof(k_plate_prefix) / sizeof(char*)) - 1)],
              plate_letter, rnd_range(rs, 1000, 99999));
 
+    /* v5：主键按 d_vehicleinfo.vehicle_id 的真实语义生成 —— **车牌号+颜色**。
+       库表注释原文：「车辆ID，车牌号+颜色 最后整-V的为外单位导入车辆」，
+       所以是 `京A12345-1` 这种非数字串。Mock 必须与真实形状一致，
+       否则 ids 过滤在 Mock 下能过、接真库就全废。 */
+    snprintf(v->vehicle_id, sizeof(v->vehicle_id), "%s-%u", v->plate, rnd_range(rs, 1, 5));
+
     /* 前 10846 台在线，其余离线 —— 与状态栏统计严格对齐 */
     v->online = (idx < VMS_MOCK_TOTAL_ONLINE) ? 1u : 0u;
     v->offline_seconds = v->online ? 0u : rnd_range(rs, 60, 86400 * 7);
@@ -261,7 +267,12 @@ static void build_company_assignment(struct vms_context* ctx)
 
         n = ctx->companies[i].count;
         for (k = 0; k < n && cursor < ctx->vehicle_count; ++k, ++cursor)
+        {
             ctx->vehicle_company[cursor] = ctx->companies[i].id;
+            /* v5：同步填字符串主键，让 Mock 路径下按 org_id 过滤也能命中 */
+            snprintf(ctx->vehicles[cursor].org_id, sizeof(ctx->vehicles[cursor].org_id),
+                     "%s", ctx->companies[i].org_id);
+        }
     }
 }
 
@@ -359,6 +370,9 @@ int32_t VMS_CALL vms_create(const char* config_json, vms_context** out_ctx)
         ctx->companies[i].online = s->online;
         ctx->companies[i].count = s->count;
         snprintf(ctx->companies[i].name, sizeof(ctx->companies[i].name), "%s", s->name);
+        /* v5：Mock 也填字符串主键（d_org_info.org_id），让按 org_id 过滤在 Mock 下同样可用。
+           Mock 的 org_id 就取 UI 序号的十进制，与服务端桩数据的编码规则一致。 */
+        snprintf(ctx->companies[i].org_id, sizeof(ctx->companies[i].org_id), "%u", s->id);
     }
     for (i = 0; i < ctx->company_count; ++i) {
         size_t k;
@@ -908,6 +922,18 @@ static const char *org_id_of(const struct vms_context *ctx, uint32_t company_id)
     return NULL;
 }
 
+/* 反查：库表字符串 org_id -> uint32 序号（v5：vms_query.org_id 落地用）。
+   查不到返回 0 —— 调用方按"不属于任何已加载组织"处理。 */
+static uint32_t company_id_of_org(const struct vms_context *ctx, const char *org_id)
+{
+    size_t i;
+    if (!org_id || !org_id[0]) return 0u;
+    for (i = 0; i < ctx->company_count; ++i)
+        if (strcmp(ctx->companies[i].org_id, org_id) == 0)
+            return ctx->companies[i].id;
+    return 0u;
+}
+
 /* 发一次 BIZ_QUERY 并取回下游 JSON 原文（malloc，调用方 free）；
    失败返回 NULL，*out_rc 为本地错误码（<0）或服务端结果码（>0） */
 static char *vms_biz_call(struct vms_context *ctx, const char *biz_type,
@@ -1032,7 +1058,11 @@ static char *vms_build_veh_param(const struct vms_context *ctx, const vms_query 
 
     if (!o) return NULL;
 
-    if (q && q->company_id)
+    /* v5：优先用字符串主键 org_id（调用方直接给库表主键，无需本机组织树）；
+        为空才回退 company_id 的 uint32 序号翻译。 */
+    if (q && q->org_id[0])
+        cJSON_AddStringToObject(o, "org_id", q->org_id);
+    else if (q && q->company_id)
     {
         const char *oid = org_id_of(ctx, q->company_id);
         if (oid && oid[0])
@@ -1053,15 +1083,14 @@ static char *vms_build_veh_param(const struct vms_context *ctx, const vms_query 
     {
         cJSON *arr = cJSON_CreateArray();
         uint32_t k;
-        char     vid[24];
         if (arr)
         {
-            /* ids 是 uint32 UI 序号；服务端按字符串主键比对，桩服务的主键规则是 "%06u"。
-               真实系统主键非数字时，应改传 vms_vehicle.vehicle_id（ABI v5 待办）。 */
+            /* v5：ids 就是 d_vehicleinfo.vehicle_id 字符串，原样下发，不做任何编码转换
+               （v4 曾用 "%06u" 把 uint32 行号拼成主键 —— 真实主键是"车牌+颜色"，拼不出来）。 */
             for (k = 0; k < q->id_count && k < VMS_QUERY_MAX_IDS; ++k)
             {
-                snprintf(vid, sizeof(vid), "%06u", q->ids[k]);
-                cJSON_AddItemToArray(arr, cJSON_CreateString(vid));
+                if (q->ids[k][0])
+                    cJSON_AddItemToArray(arr, cJSON_CreateString(q->ids[k]));
             }
             cJSON_AddItemToObject(o, "ids", arr);
         }
@@ -1227,15 +1256,26 @@ static int company_in_subtree(const struct vms_context* ctx, uint32_t company_id
 static int vehicle_match(const struct vms_context* ctx, size_t idx, const vms_query* q)
 {
     const vms_vehicle* v = &ctx->vehicles[idx];
-    if (q->company_id && !company_in_subtree(ctx, ctx->vehicle_company[idx], q->company_id)) return 0;
+    uint32_t root = q->company_id;
+
+    /* v5：org_id 非空时优先 —— 反查成 uint32 序号后仍走同一套"子树"逻辑，
+       保持与后台 recursive=1 完全一致的语义（车挂在叶子单位，父组织要含下级）。
+       组织树里查不到该 org_id 时按"不属于"处理，不静默退化成全量。 */
+    if (q->org_id[0])
+    {
+        root = company_id_of_org(ctx, q->org_id);
+        if (root == 0u) return 0;
+    }
+    if (root && !company_in_subtree(ctx, ctx->vehicle_company[idx], root)) return 0;
     if (q->online_only && !v->online) return 0;
     if (q->alarm_only && (v->alarm_flags & q->alarm_mask) == 0) return 0;
     if (q->keyword[0] && !strstr(v->plate, q->keyword) && !strstr(v->self_code, q->keyword)) return 0;
-    /* v2：按车辆 ID 精确过滤（树上勾选若干车辆）。id_count==0 不过滤。 */
+    /* 按车辆主键精确过滤（树上勾选若干车辆）。id_count==0 不过滤。
+       v5：比较的是字符串主键 vehicle_id（"车牌-颜色"），不再是 uint32 行号。 */
     if (q->id_count) {
         uint32_t k, hit = 0;
         for (k = 0; k < q->id_count; ++k)
-            if (q->ids[k] == v->id) { hit = 1; break; }
+            if (q->ids[k][0] && strcmp(q->ids[k], v->vehicle_id) == 0) { hit = 1; break; }
         if (!hit) return 0;
     }
     return 1;
@@ -1248,12 +1288,13 @@ int32_t VMS_CALL vms_query_vehicles(const vms_context* ctx, const vms_query* q,
     if (!ctx || !out_count) return VMS_ERR_INVALID_ARG;
     if (q && q->limit == 0) return VMS_ERR_INVALID_ARG;
 
-    /* 已登录：交给后台做过滤 + 分页（本地只搬数据）；
-       组织过滤需要 uint32 序号 -> 库表字符串 org_id 的映射，故先确保组织树已加载。 */
+    /* 已登录：交给后台做过滤 + 分页（本地只搬数据）。
+       v5：只有回退到 company_id（uint32 序号）时才需要先加载组织树做翻译；
+       调用方直接给 org_id 就不必多这一趟往返。 */
     if (ctx->logged_in && ctx->sess)
     {
         struct vms_context* m = (struct vms_context*)ctx;
-        if (m->company_count == 0)
+        if (m->company_count == 0 && !(q && q->org_id[0]) && q && q->company_id)
         {
             int32_t rc = vms_fetch_companies(m);
             if (rc != VMS_OK) return rc;

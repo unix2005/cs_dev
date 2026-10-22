@@ -108,7 +108,9 @@ internal unsafe struct NativeVehicle
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
 internal unsafe struct NativeQuery
 {
-    public const int QueryMaxIds = 256;   // 必须与 vms_api.h 的 VMS_QUERY_MAX_IDS 一致
+    // 必须与 vms_api.h 的 VMS_QUERY_MAX_IDS 一致（v5: 256 -> 128）
+    public const int QueryMaxIds = 128;
+    public const int IdsBytes = QueryMaxIds * NativeVehicle.KeyMax;   // char[128][40]
 
     public uint CompanyId;
     public uint Offset;
@@ -118,8 +120,12 @@ internal unsafe struct NativeQuery
     public uint AlarmMask;
     public uint Reserved;
     public fixed byte Keyword[NativeVehicle.TextMax];
-    public fixed uint Ids[QueryMaxIds];
+    // v5：库表字符串主键 d_vehicleinfo.vehicle_id（"车牌-颜色"），不再是 uint32 行号。
+    // C# 不支持二维 fixed buffer，用一维字节块 + 手动步进（步长 = KeyMax）。
+    public fixed byte Ids[IdsBytes];
     public uint IdCount;
+    // v5：组织子树根，库表主键 d_org_info.org_id；非空时优先于 CompanyId
+    public fixed byte OrgId[NativeVehicle.KeyMax];
 }
 
 /// <summary>

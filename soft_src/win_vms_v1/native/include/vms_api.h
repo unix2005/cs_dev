@@ -40,14 +40,17 @@ extern "C" {
 #endif
 
 /* --------------------------------- 版本 ----------------------------------- */
-/* v4：vms_company 追加 org_id、vms_vehicle 追加 vehicle_id/org_id（M3 业务列表）。
-   原因：d_org_info.org_id(CHAR(36)) / d_vehicleinfo.vehicle_id(CHAR(32)) 是**字符串主键**，
-        uint32 装不下（真实系统里可能是 UUID 或"车牌+颜色"），客户端内部的 uint32 id
-        只是 UI 序号；定位/视频等后续按主键检索的业务必须用字符串主键。
-   仍在尾部追加字段，不改动既有字段布局。
-   v3：新增 vms_credentials + vms_login/vms_logout/vms_heartbeat（M1 登录闭环）。
-   仅在尾部追加函数与结构体，不改动既有结构布局。 */
-#define VMS_ABI_VERSION  4u
+/* v5：vms_query.ids 由 uint32[] 改为「库表主键字符串数组」char[][VMS_KEY_MAX]，
+       并新增 vms_query.org_id（d_org_info.org_id，子树根）。
+   原因：d_vehicleinfo.vehicle_id 是 CHAR(32)，注释原文「车辆ID，车牌号+颜色」，
+        即 `京A12345-1` 这种**非数字**业务主键。v4 用 uint32 + "%06u" 反向编码只是桩服务的
+        临时约定，接真实库后 `京A12345-1` 根本编码不进 uint32 —— 这是正确性问题，不是便利问题。
+        *** v5 是 breaking change（ids 元素类型变了）***：旧 UI 配新 DLL 会静默错位，
+        因此必须靠 vms_abi_version() 自检拦住（C# 侧 ExpectedAbiVersion 同步抬到 5）。
+        新字段 org_id 仍放在结构体尾部，v4 调用方不碰 ids 时可继续编译。
+   v4：vms_company 追加 org_id、vms_vehicle 追加 vehicle_id/org_id（M3 业务列表）。
+   v3：新增 vms_credentials + vms_login/vms_logout/vms_heartbeat（M1 登录闭环）。 */
+#define VMS_ABI_VERSION  5u
 #define VMS_VER_MAJOR    1
 #define VMS_VER_MINOR    1
 #define VMS_VER_PATCH    0
@@ -143,12 +146,14 @@ typedef struct vms_vehicle {
 #define VMS_ALARM_GEOFENCE  0x0008u  /* 越界 */
 #define VMS_ALARM_GNSS_LOST 0x0010u  /* GNSS 失锁 */
 
-/* 单次查询最多按多少个车辆 ID 过滤（覆盖"在树上勾选一整页"的场景）。 */
-#define VMS_QUERY_MAX_IDS  256
+/* 单次查询最多按多少个车辆 ID 过滤（覆盖"在树上勾选一整页"的场景）。
+   v5：单页上限是 100（见 BIZ_PAGE_LIMIT_MAX），勾选不会超过一页，128 留足余量；
+       元素从 4B 涨到 40B，256 个会让 vms_query 从 1120B 涨到 10KB，故下调。 */
+#define VMS_QUERY_MAX_IDS  128
 
 /* 查询条件：分页拉取，配合 ListView 增量加载，支持 3 万+ 车辆不卡 UI。
-   注（M3）：company_id 仍是 uint32 UI 序号；native 内部会把它翻译成库表的
-   字符串 org_id 再发往后台（见 vms_company.org_id）。 */
+   注：company_id 是 uint32 UI 序号，native 内部会把它翻译成库表字符串 org_id（见
+   vms_company.org_id）。v5 起可直接填 org_id 跳过这次翻译（推荐）。 */
 typedef struct vms_query {
     uint32_t company_id;   /* 0 = 全部；非 0 = 该组织**及其所有下级组织**（子树过滤） */
     uint32_t offset;
@@ -158,11 +163,19 @@ typedef struct vms_query {
     uint32_t alarm_mask;   /* 与 alarm_flags 做 & 判断 */
     uint32_t reserved;
     char     keyword[VMS_TEXT_MAX]; /* 车牌/自编号模糊匹配，UTF-8，空串=不过滤 */
-    /* —— v2 新增：按车辆 ID 精确过滤（树中勾选若干车辆 → 定位数据栏只显示这些）——
+    /* —— 按车辆**主键**精确过滤（树中勾选若干车辆 → 定位数据栏只显示这些）——
        id_count==0 表示不过滤；否则只返回 ids[0..id_count) 里的车辆。
+
+       v5 起元素类型是「库表主键字符串」d_vehicleinfo.vehicle_id（CHAR(32)，车牌+颜色），
+       不再是 uint32 行号 —— 直接把 vms_vehicle.vehicle_id 拷进来即可，native 不做任何编码转换。
        定长数组 + 计数，保持结构体 blittable，避免跨 ABI 传指针数组。 */
-    uint32_t ids[VMS_QUERY_MAX_IDS];
+    char     ids[VMS_QUERY_MAX_IDS][VMS_KEY_MAX];
     uint32_t id_count;
+    /* v5 新增：组织子树根，直接用库表主键 d_org_info.org_id（CHAR(36)）。
+       非空时**优先于** company_id：省掉"uint32 序号 -> 字符串"的翻译，
+       且不再依赖本机组织树缓存（未加载组织树时也能按组织查）。
+       为空则回退 company_id（v4 行为，native 内部查组织树翻译）。 */
+    char     org_id[VMS_KEY_MAX];
 } vms_query;
 
 /* ============================ M1：登录凭据 ============================ */

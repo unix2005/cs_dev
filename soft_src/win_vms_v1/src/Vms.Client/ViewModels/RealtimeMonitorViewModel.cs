@@ -36,8 +36,10 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
     private uint _scopeCompanyId;
     private string _scopeCompanyName = string.Empty;
     private string _scopeKeyword = string.Empty;
-    private readonly HashSet<uint> _selectedVehicleIds = new();
-    private readonly Dictionary<uint, List<uint>> _orgAddedIds = new();
+    // v5：选中集合存的是**库表主键字符串** d_vehicleinfo.vehicle_id（"车牌-颜色"），
+    // 不再是 uint32 行号 —— 行号只是本机 UI 序号，跨进程/跨请求不稳定，服务端也不认。
+    private readonly HashSet<string> _selectedVehicleIds = new();
+    private readonly Dictionary<uint, List<string>> _orgAddedIds = new();
     private VehicleNode? _lastToggledVehicle;
 
     /// <summary>懒加载车辆时单组织的上限。组织下可能有上万车，树里不可能全放，先给一个能看的量。</summary>
@@ -367,14 +369,15 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
             //    让它与 Feed 同步，再断言数据栏只含这 2 台。
             RebuildPositions();
 
+            // v5：Ids 里是字符串主键 vehicle_id
             var idsOk = Feed.Query.Ids.Count == 2
-                        && Feed.Query.Ids.Contains(v1.Id)
-                        && Feed.Query.Ids.Contains(v2.Id);
+                        && Feed.Query.Ids.Contains(v1.VehicleId)
+                        && Feed.Query.Ids.Contains(v2.VehicleId);
             var feedOk = Feed.Count == 2 && Feed.TotalCount == 2;
             var posOk = Positions.Count == 2;
             sb.AppendLine(
                 $"{(idsOk && feedOk && posOk ? "PASS" : "FAIL")} 车辆勾选 → 定位数据栏联动\n" +
-                $"  勾选车辆: {v1.Plate}(id={v1.Id}), {v2.Plate}(id={v2.Id})\n" +
+                $"  勾选车辆: {v1.Plate}(vehicleId={v1.VehicleId}), {v2.Plate}(vehicleId={v2.VehicleId})\n" +
                 $"  Feed.Query.Ids 数量={Feed.Query.Ids.Count}  命中期望={idsOk}\n" +
                 $"  Feed.Count={Feed.Count}  Feed.TotalCount={Feed.TotalCount}  ({(feedOk ? "OK" : "BAD")})\n" +
                 $"  Positions.Count={Positions.Count}  ({(posOk ? "OK" : "BAD")})");
@@ -634,11 +637,13 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                 SelectedCompanyId = 0;
                 UncheckAllOrgsExcept(null);
             }
-            _selectedVehicleIds.Add(vehicle.Id);
+            // 有主键才收进选中集；占位/未取到主键的行跳过（空串会被 native 端忽略）
+            if (!string.IsNullOrEmpty(vehicle.VehicleId))
+                _selectedVehicleIds.Add(vehicle.VehicleId);
         }
         else
         {
-            _selectedVehicleIds.Remove(vehicle.Id);
+            _selectedVehicleIds.Remove(vehicle.VehicleId);
         }
 
         _lastToggledVehicle = vehicle;
@@ -673,7 +678,8 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                 org.SetCheckedWithPropagation(true);
 
                 var (rows, _) = await _source.QueryAsync(new VehicleQuery { CompanyId = org.Id, Limit = (uint)total }, ct);
-                var ids = rows.Select(r => r.Id).ToList();
+                // v5：取字符串主键；空主键（占位行）不能进过滤集，否则服务端匹配不到
+                var ids = rows.Select(r => r.VehicleId).Where(s => !string.IsNullOrEmpty(s)).ToList();
                 _orgAddedIds[org.Id] = ids;
                 foreach (var id in ids) _selectedVehicleIds.Add(id);
 
@@ -726,9 +732,10 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>把 org 子树内、id 落在给定集合里的车辆行勾选/取消（仅影响已加载的行）。</summary>
-    private void SetTreeVehiclesChecked(CompanyNode org, List<uint> ids, bool value)
+    private void SetTreeVehiclesChecked(CompanyNode org, List<string> ids, bool value)
     {
-        foreach (var v in org.DescendantsAndSelf().OfType<VehicleNode>().Where(v => v.Id != 0 && ids.Contains(v.Id)))
+        foreach (var v in org.DescendantsAndSelf().OfType<VehicleNode>()
+                             .Where(v => v.VehicleId.Length > 0 && ids.Contains(v.VehicleId)))
             v.IsChecked = value;
     }
 

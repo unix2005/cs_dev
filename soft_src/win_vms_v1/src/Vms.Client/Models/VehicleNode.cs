@@ -107,9 +107,16 @@ public sealed class VehicleNode : OrgNodeBase
         Lat = row.Lat;
     }
 
+    /// <summary>
+    /// 库表主键 <c>d_vehicleinfo.vehicle_id</c>（形如 <c>京A12345-1</c>）。
+    /// v5 起「选中集合」按这个字符串过滤，<see cref="OrgNodeBase.Id"/> 只是 UI 行号。
+    /// 懒加载占位节点为空串 —— 过滤时会跳过空串，不会误伤真实车辆。
+    /// </summary>
+    public string VehicleId { get; init; } = string.Empty;
+
     public static VehicleNode From(VehicleRow row)
     {
-        var node = new VehicleNode { Id = row.Id, Name = row.Plate };
+        var node = new VehicleNode { Id = row.Id, Name = row.Plate, VehicleId = row.VehicleId };
         node.Apply(row);
         return node;
     }

@@ -43,11 +43,22 @@ public sealed class VehicleQuery
     public string Keyword { get; set; } = string.Empty;
 
     /// <summary>
-    /// 车辆 ID 精确过滤（v2 新增）：非空时<b>只</b>返回这些 ID 的车辆，
+    /// v5：组织过滤的<b>首选写法</b> —— 直接给库表主键 <c>d_org_info.org_id</c>。
+    /// 非空时优先于 <see cref="CompanyId"/>：省掉"uint32 序号 → 字符串"的翻译，
+    /// 也无需本机已加载组织树。子树语义不变（该组织及其所有下级）。
+    /// </summary>
+    public string OrgId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 车辆<b>主键</b>精确过滤：非空时<b>只</b>返回这些主键的车辆，
     /// 用于「在树上勾选若干车辆 → 定位数据栏只显示这些」。
     /// 为空（<see cref="Ids"/>.Count == 0）表示不过滤。
+    /// <para>
+    /// v5 起元素是<b>字符串</b>（<c>d_vehicleinfo.vehicle_id</c>，形如 <c>京A12345-1</c>），
+    /// 直接填 <see cref="VehicleRow.VehicleId"/>，不再用 uint32 行号。
+    /// </para>
     /// </summary>
-    public List<uint> Ids { get; set; } = new();
+    public List<string> Ids { get; set; } = new();
 
     /// <summary>
     /// 强制空结果（v2 新增，纯托管标志，不进 native 结构体）。
@@ -57,15 +68,15 @@ public sealed class VehicleQuery
     public bool NoResults { get; set; }
 
     /// <summary>
-    /// Ids 精确过滤的硬上限（必须与 native 结构体 <c>vms_query.ids[256]</c> 一致）。
-    /// 超过这个数量的"选中集合"不能走 Ids 过滤，须改用组织子树（CompanyId）过滤。
+    /// Ids 精确过滤的硬上限（必须与 native 结构体 <c>vms_query.ids[128]</c> 一致）。
+    /// 超过这个数量的"选中集合"不能走 Ids 过滤，须改用组织子树（CompanyId / OrgId）过滤。
     /// </summary>
-    public const int MaxIdFilter = 256;
+    public const int MaxIdFilter = 128;
 
     public VehicleQuery Clone()
     {
         var copy = (VehicleQuery)MemberwiseClone();
-        copy.Ids = new List<uint>(Ids);   // 避免与源查询共享同一个列表
+        copy.Ids = new List<string>(Ids);   // 避免与源查询共享同一个列表
         return copy;
     }
 }

@@ -128,7 +128,14 @@ internal sealed class MockVehicleDataSource : IVehicleDataSource
                 ct.ThrowIfCancellationRequested();
 
                 var row = Generate(idx);
-                if (query.Ids.Count > 0 && !query.Ids.Contains(idx)) continue;
+                // v5：按字符串主键过滤（vehicle_id），不再是 uint32 行号
+                if (query.Ids.Count > 0 && !query.Ids.Contains(row.VehicleId)) continue;
+                // v5：Mock 的 org_id 就是公司序号的十进制串，解析回序号后复用同一套子树表
+                if (!string.IsNullOrEmpty(query.OrgId))
+                {
+                    if (!uint.TryParse(query.OrgId, out var cid)) continue;         // 认不出 → 不属于
+                    if (!(_subtree.TryGetValue(cid, out var os) && os.Contains(_companyOf[idx]))) continue;
+                }
                 if (query.CompanyId != 0 &&
                     !(_subtree.TryGetValue(query.CompanyId, out var scope) && scope.Contains(_companyOf[idx]))) continue;
                 if (query.OnlineOnly && !row.Online) continue;
@@ -154,11 +161,16 @@ internal sealed class MockVehicleDataSource : IVehicleDataSource
         var online = idx <= TotalOnline;
         var alarm = Next(100) < 12 ? (AlarmFlags)(1u << (int)Next(5)) : AlarmFlags.None;
 
+        // v5：主键按 d_vehicleinfo.vehicle_id 的真实语义 —— **车牌号+颜色**（非数字），
+        // 与 native Mock、真实库形状一致；否则 ids 过滤在 Mock 下能过、接真库就全废。
+        var plate = $"{prefixes[Next((uint)prefixes.Length)]}{(char)('A' + Next(26))}{Next(90000) + 1000:D5}";
+
         return new VehicleRow
         {
             Id = idx,
+            VehicleId = $"{plate}-{Next(5) + 1}",
             SelfCode = $"QC{idx % 100000:D5}",
-            Plate = $"{prefixes[Next((uint)prefixes.Length)]}{(char)('A' + Next(26))}{Next(90000) + 1000:D5}",
+            Plate = plate,
             Time = DateTime.Now.AddSeconds(online ? 0 : -Next(86400)).ToString("yyyy-MM-dd HH:mm:ss"),
             SpeedKph = online ? Next(96) : 0f,
             Location = Cities[Next((uint)Cities.Length)],
