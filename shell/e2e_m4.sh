@@ -74,6 +74,21 @@ wait_port() {
 # ---------------------------------------------------------------- 1. 编译 UT
 # SKIP_BUILD=1 可跳过（UT 已编译好时，省掉每次 ~15s 的重编）
 UT="$SOFT_HOME/lib_src/l_4/q_clientcomm/ut/bin/qc_login_ut"
+
+# 跨端构建残留自检：Windows 构建会在源码树留下 COFF .o，make 只看时间戳不会重编，
+# Linux 链接时表现为 undefined reference 甚至 ld 段错误（反之亦然）。
+# 这里先扫一遍，发现非本机架构的 .o 就清掉 —— 比让人记"跑之前先 find -delete"可靠。
+QC_DIR="$SOFT_HOME/lib_src/l_4/q_clientcomm"
+if command -v file >/dev/null 2>&1; then
+    BAD_O=$(find "$QC_DIR" -name '*.o' -exec file {} \; 2>/dev/null |
+            grep -v 'ELF' | head -1)
+    if [ -n "$BAD_O" ]; then
+        printf '\033[33m[!]\033[0m 发现非 ELF 的 .o 残留（跨端构建遗留），已清理: %s\n' \
+               "$(printf '%s' "$BAD_O" | cut -c1-60)"
+        find "$QC_DIR" -name '*.o' -delete
+    fi
+fi
+
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
 log "编译 l_4 与 qc_login_ut"
 if ! ( cd "$SOFT_HOME/lib_src/l_4/q_clientcomm" &&
@@ -108,6 +123,25 @@ wait_port 9003 biz
 wait_port "$NETD_PORT" netd
 printf '服务就绪：netd=%s login=9002 biz=9003\n' "$NETD_PORT"
 
+# ------------------------------------------------- 2.1 可选：起 knockd 验证"重建时重新敲门"
+# 为什么值得单独验：nftables 放行条目有 TTL（默认 300s），长连接断开期间条目可能已过期，
+# 不重新敲门就会出现"连不上但原因不明"。这条路径只有带上 --knock 才会走到。
+# WSL 里 knockd 的 seccomp/nftables 会失败（无 CAP_NET_ADMIN），但**UDP 收包照常**，
+# 足以证明"重建时确实发了格式正确的 SPA 包"。
+KNOCK="${KNOCK:-0}"
+KNOCK_ARGS=""
+if [ "$KNOCK" = "1" ]; then
+    SPA_KEY="${SPA_KEY:-$CONF_DIR/spa.key}"
+    KNOCK_PORT="${KNOCK_PORT:-5001}"
+    [ -f "$SPA_KEY" ] || die "缺少 SPA 密钥 $SPA_KEY（KNOCK=1 需要）"
+    "$SOFT_HOME/bin/q_service_knockd" -c "$CONF_DIR/knockd_conf.xml" \
+            >"$CONF_DIR/knockd.log" 2>&1 &
+    PIDS="$PIDS $!"
+    sleep 0.5
+    KNOCK_ARGS="--knock 127.0.0.1:${KNOCK_PORT} --spakey ${SPA_KEY}"
+    printf 'knockd 已起：127.0.0.1:%s（日志 %s/knockd.log）\n' "$KNOCK_PORT" "$CONF_DIR"
+fi
+
 # ---------------------------------------------------------------- 3. 跑会话治理用例
 log "会话治理自检（心跳 %ss，窗口 %ss，并发 %s 线程）" "$HB" "$SEC" "$CONCURRENT"
 # stdbuf：UT 输出重定向到文件/管道时是全缓冲的，挂死一行都看不到 —— 强制行缓冲。
@@ -127,9 +161,29 @@ fi
 $STDBUF $RUNNER "$UT" --host 127.0.0.1 --port "$NETD_PORT" --user "$USER_NAME" --pass "$USER_PASS" \
       --pub "$CONF_DIR/netd_sm2.pub" \
       --keeper --hb-interval "$HB" --keeper-sec "$SEC" --concurrent "$CONCURRENT" \
-      --no-biz $CASE_ARGS 2>&1 |
+      --no-biz $CASE_ARGS $KNOCK_ARGS 2>&1 |
     grep -vE '^\s*$' | tail -${TAIL_N:-45}
 rc_ut=${PIPESTATUS[0]}
 [ "$rc_ut" = "124" ] && printf '\033[31mUT 超时（%ss）：存在挂死，见上方最后一行输出\033[0m\n' "$UT_TIMEOUT"
+
+# 敲门验证：重建连接时 keeper 必须重发 SPA 包（nftables 放行条目有 TTL，不重敲门就会"连不上但原因不明"）。
+# 判定要严格：只看**收包**相关日志（放行/校验/cid），启动行的 "knockd start" 不算证据 ——
+# 否则 knockd 一崩、grep 命中启动行就会给出假 [OK]。
+if [ "$KNOCK" = "1" ]; then
+    log "敲门验证（重建连接时应重新发 SPA 包）"
+    if ! pgrep -x q_service_knockd >/dev/null 2>&1; then
+        printf '\033[33m[--]\033[0m knockd 进程已不在（WSL 无 CAP_NET_ADMIN/nftables，会崩于事件循环），'
+        printf '本环境无法验证敲门路径；代码路径见 qc_keeper_rebuild() -> qc_knock()\n'
+        tail -3 "$CONF_DIR/knockd.log" 2>/dev/null
+    else
+        n=$(grep -cE '放行|SPA 校验|cid=|allow' "$CONF_DIR/knockd.log" 2>/dev/null || echo 0)
+        if [ "${n:-0}" -gt 0 ]; then
+            printf '\033[32m[OK]\033[0m knockd 收到 %s 条 SPA 记录：重建连接时确已重新敲门\n' "$n"
+            grep -E '放行|SPA 校验|cid=' "$CONF_DIR/knockd.log" | tail -4
+        else
+            printf '\033[33m[--]\033[0m knockd 存活但无收包记录：确认用例是否真的触发了重建（需跑用例3）\n'
+        fi
+    fi
+fi
 
 log "完成（服务端日志：${CONF_DIR}/*.log）"

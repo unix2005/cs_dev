@@ -411,8 +411,17 @@ int main(int argc, char *argv[])
     /* 进入事件循环前安装 seccomp 沙箱（此时 socket/reactor/log 均已就绪；
        首包才会懒加载 libnftables 上下文走 Netlink，已在允许列表内）。
        沙箱实现位于共享库 libqcommon（daemon_seccomp_apply，profile=3=knockd）。
-       安装失败仅记日志、不阻断服务（纵深防御失败也应尽量可用）。 */
-    (void)daemon_seccomp_apply(SECCOMP_PROFILE_KNOCKD);
+       安装失败仅记日志、不阻断服务（纵深防御失败也应尽量可用）。
+
+       排障开关 KNOCKD_NO_SECCOMP=1：跳过安装。
+       存在理由：无 CAP_SYS_ADMIN 的容器 / WSL / 受限内核下 seccomp_load 会失败，
+       而失败路径在部分 libseccomp 版本上会把进程带崩（表现为"起得来、立刻段错误"），
+       此时 SPA 敲门整体失效。排障时先用它确认"除沙箱外一切正常"，
+       再决定是补权限还是接受降级（降级必须体现在部署检查单里，不能无声无息）。 */
+    if (getenv("KNOCKD_NO_SECCOMP") != NULL)
+        QLOG_WARN(g_log, "KNOCKD_NO_SECCOMP 已设置：跳过 seccomp 安装（仅排障用，生产禁止）");
+    else
+        (void)daemon_seccomp_apply(SECCOMP_PROFILE_KNOCKD);
 
     /* 事件循环：收到 SIGINT/SIGTERM 后 daemon_should_stop() 置位即退出 */
     while (!daemon_should_stop())
