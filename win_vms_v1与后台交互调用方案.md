@@ -333,11 +333,70 @@ bash shell/e2e_m3.sh ONLY=vehicles BIZ_PARAM='{"org_id":"14"}' LIMIT=5
 
 # Windows 侧（需服务已在跑；公钥要放到 Windows 可访问的路径）
 python shell/vmscore_smoke.py --pub E:\win_e\cs_dev\tmp_e2e\netd_sm2.pub --limit 5
+python shell/vmscore_smoke.py --pub ...\netd_sm2.pub --ids "京Z38406-1,津N80851-1" --limit 5
+python shell/vmscore_smoke.py --pub ...\netd_sm2.pub --org-key 14 --limit 3
 ```
 
+---
+
+## 7.4 ABI v5：`vms_query.ids` 改为字符串主键（M3 收尾）
+
+**问题**：M3 留了个待办 —— `vms_query.ids[]` 还是 `uint32`，native 按 `"%06u"` 拼成字符串主键，
+桩服务再按同一规则还原。这个 hack 只在"主键是纯数字"时成立。
+
+**结论：改 `vms_query.ids` 为字符串，不给数据库加数字 id。**
+
+依据是 `sql/vms30.sql` 的列注释原文：
+
+```
+comment on column "d_vehicleinfo"."vehicle_id" is
+'车辆ID，车牌号+颜色 最后整-V的为外单位导入车辆';
+```
+
+主键**天然非数字**（`京A12345-1` / `京A12345-V`）。所以这是**正确性问题，不是便利性问题** ——
+不改，接真实库后 Ids 过滤直接失效。
+
+不加数字列的理由：
+
+| 维度 | 说明 |
+|---|---|
+| 迁移成本 | 存量 VMS3.0 表，注释明确要求与 `d_ve_alarm_switch` / `d_ve_over_speed` / `d_ve_area_ovspeed` / `d_ve_area_switch` / `d_vehicle_term` / `d_vehicle_camera` 六表联动，加列 = 六表同改 + 数据迁移 |
+| 性能 | CHAR(32) 定长 B-tree 对 3 万行完全够用，点查差距在微秒级；真正瓶颈是 `keyword LIKE '%京%'` 全表扫，与主键类型无关 |
+| 一致性 | 部标 808 平台 / ERP 都按车牌+颜色关联，凭空加第二主键必然引入同步不一致 |
+
+唯一该考虑"不变代理键"的理由是**车牌会变更**（换牌/过户 → 历史定位断链），
+那是数据模型层面的独立改造，且新代理键仍是字符串（UUID）—— 不影响接口形状。
+
+**改了什么**
+
+| 位置 | 改动 |
+|---|---|
+| `vms_api.h` | **ABI v5（breaking）**：`vms_query.ids` 由 `uint32[256]` 改为 `char[128][40]`；尾部追加 `vms_query.org_id`。`VMS_QUERY_MAX_IDS` 256→128（元素 4B→40B，256 会让结构体到 10KB） |
+| `vms_core.c` | `vms_build_veh_param` 的 ids 原样下发、不再 `"%06u"`；`org_id` 非空时优先于 `company_id`（省掉一次组织树翻译，也不再强制先拉组织树）；`vehicle_match` 按 `vehicle_id` 字符串比对；新增 `company_id_of_org()` 反查，保证 Mock 路径下 `org_id` 仍是**子树**语义而非精确匹配 |
+| Mock 数据 | `seed_vehicle` 生成 `vehicle_id = "车牌-颜色"`，公司 `org_id` 也填上 —— Mock 与真实形状必须一致，否则"Mock 能过、真库全废" |
+| `q_s_vmsv1__biz/biz_stub.c` | 主键从 `"%06u"` 改为**车牌+颜色**（`京Z38406-1`，`-V` 表示外单位导入）；抽出 `plate_of()` / `vehicle_id_of()`，保证 `vehicleId`、`lisPlate`、关键字过滤三者同源 |
+| C# 侧 | `NativeQuery.Ids` 改 `fixed byte[128*40]` + 手动步进（C# 无二维 fixed buffer），新增 `OrgId`；`VehicleQuery.Ids` 改 `List<string>`、新增 `OrgId`；`VehicleNode.VehicleId`；`RealtimeMonitorViewModel._selectedVehicleIds` 改 `HashSet<string>`；`ExpectedAbiVersion=5` |
+| 工具 | `biz_probe.py` 自检的 ids 用例不再写死主键，改为"先取第 0 页再用它的主键回查"；`e2e_m3.sh` 同；`vmscore_smoke.py` 升 v5 + 新增 `--ids` / `--org-key` |
+
+**实测**
+
+```
+[biz 自检]  vehicles ids=["京Z38406-1","津N80851-1"] total=2         ALL OK
+            分页 page0=[京Z38406-1, 津N80851-1, 冀P32707-1, 晋L34797-V, 蒙R58446-1] 无重叠
+[全链路 ]  7 个用例 ALL PASS（含 ids=["京Z38406-1","津N80851-1","冀P32707-1"]）
+[Windows]  ABI=5  struct: company 128B / vehicle 312B / query 5256B（与 DLL 一致）
+           --ids "京Z38406-1,津N80851-1,蒙R58446-1" -> 命中 3，vehicleId 原样搬回
+           --org-key 14 -> 命中 398，挂在 orgId=1401
+```
+
+**两条要注意的坑**
+
+1. **`vms_query` 从 1120B 涨到 5256B**，且类型变了 —— 旧 UI 配新 DLL 会静默错位，
+   所以 `ExpectedAbiVersion` 必须同步抬（C# 启动自检会拦）。
+2. **`org_id` 是子树语义**：Mock 路径不能拿 `org_id` 跟 `v->org_id` 做精确相等比较
+   （车挂在叶子单位，父组织会一台都查不到），必须反查成序号后走 `company_in_subtree`。
+
 **已知未覆盖 / 下一步**
-- **Ids 过滤仍走 uint32**：`vms_query.ids[]` 按 `"%06u"` 还原成桩主键；真实系统 `vehicle_id` 非数字时
-  应改传字符串数组（ABI v5 待办）。`company_id` → `org_id` 的翻译依赖本机组织树缓存，未加载时会先拉一次。
 - 桩服务**不校验** `org_id` 是否真实存在（未知 org 返回 0 行，不报错）。
 - biz 桩未做聚合校验：`vehicleCount` 取截图值（18714 等），与车辆实际归属数（9392）不严格相等 —— 换真实 SQL 时应统一。
 - C# 仍是环境变量自动登录通道；M4 应换正式登录对话框 + 凭据管理，并接 M4 的心跳/重连状态机。

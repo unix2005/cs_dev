@@ -121,13 +121,13 @@
 | `online_only` | int | 0 | |
 | `alarm_only` | int | 0 | 配合 `alarm_mask` 位与 |
 | `alarm_mask` | int | 0 | 0 表示"任一报警" |
-| `ids` | string[] | 空 | 车辆主键精确过滤（树上勾选若干车辆），上限 256 |
+| `ids` | string[] | 空 | 车辆**主键字符串**精确过滤（树上勾选若干车辆），上限 128。元素必须是 `vehicleId` 原值，**禁止**做任何数值转换 |
 
 ### 响应 data.items[]
 
 | JSON 字段 | 库表列 | 类型 | 说明 |
 |---|---|---|---|
-| `vehicleId` | vehicle_id | string | CHAR(32) 主键（真实系统可能是"车牌+颜色"） |
+| `vehicleId` | vehicle_id | string | CHAR(32) 主键。库表注释原文：**「车辆ID，车牌号+颜色 最后整-V的为外单位导入车辆」**，即 `京A12345-1` / `京A12345-V` 这种**非数字**业务主键 |
 | `lisPlate` | lis_plate | string | CHAR(20)，需 RTRIM |
 | `lisPlateColor` | lis_plate_color | string | 1蓝 2黄 3白 4黑 5绿 |
 | `orgId` | org_id | string | 归属组织 |
@@ -172,9 +172,24 @@
 | `vms_vehicle.location / issue` | `location / alarmText` |
 | `vms_vehicle.online / offline_seconds / alarm_flags / speed_kph / lon / lat` | 同名扩展字段 |
 
-> **已知限制（ABI v5 待办）**：`vms_query.ids[]` 仍是 `uint32`，桩服务按 `"%06u"` 还原成字符串主键；
-> 真实系统的 `vehicle_id` 若不是数字（如"车牌+颜色"或 UUID），Ids 过滤应改传字符串数组。
-> 同理 `company_id`（uint32）→ `org_id`（字符串）的翻译目前依赖本机缓存的组织树。
+### 主键：为什么必须是字符串，不能给库加数字 id
+
+`d_vehicleinfo.vehicle_id` 是 CHAR(32)，注释原文「车辆ID，车牌号+颜色」——
+它天然是**非数字**的（`京A12345-1`），且是部标 808 / ERP / 报警联动表的关联键。
+曾经有一版客户端 ABI 用 `uint32 ids[]` + `"%06u"` 反向编码，接真实库后这类主键
+**根本编码不进 uint32**，接口直接废掉。所以 v5 把 `vms_query.ids` 改成字符串数组，
+`biz_param.ids` 与 `data.items[].vehicleId` 同为字符串，端到端不做任何转换。
+
+> **不建议**为了客户端方便给 `d_vehicleinfo` 加自增数字列：
+> - 这是存量 VMS3.0 库表，注释里明确要求与 `d_ve_alarm_switch` / `d_ve_over_speed` /
+>   `d_ve_area_ovspeed` / `d_ve_area_switch` / `d_vehicle_term` / `d_vehicle_camera`
+>   六张表联动，加列 = 六张表一起改 + 数据迁移；
+> - CHAR(32) 定长做 B-tree 索引对 3 万行量级完全够用（点查差距在微秒级，
+>   真正的瓶颈是 `keyword LIKE '%京%'` 这类全表扫，与主键类型无关）；
+> - 外部系统按车牌+颜色关联，凭空引入第二个主键必然带来同步不一致。
+>
+> 唯一该考虑"不变代理键"的理由是**车牌会变更**（换牌/过户后历史定位断链），
+> 那是数据模型层面的独立改造，且新代理键仍是字符串（UUID）。
 
 ---
 
