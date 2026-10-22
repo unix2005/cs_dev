@@ -208,9 +208,12 @@ ut/bin/qc_login_ut.exe --host <ip> --port 18099 --user qiaoshui --pass 123456 \
     --pub <netd_sm2.pub> [--knock <ip>:5001 --spakey <16B 密钥文件>]
 ```
 
-**已知未覆盖**：macOS 侧无 darwin 工具链，仅做编译性保证（源码无平台专属分支）；
-`knockd` 在 WSL 下启用 IPv6 监听后 segfault（疑似 nft 上下文初始化失败后未判空，既有缺陷，
-与本次改动无关），故 SPA **服务端侧**校验留待真实 Linux + nftables 环境验证。
+**已知未覆盖**：macOS 侧无 darwin 工具链，仅做编译性保证（源码无平台专属分支）。
+
+> **更正（2026-10-22）**：此前这里记的「knockd 在 WSL 下 segfault」是**误判**。
+> 判据 `pgrep -x q_service_knockd` 恒为假 —— Linux 的 `/proc/pid/comm` 截断到 15 字符，
+> `q_service_knockd`（16 字符）被截成 `q_service_knock`，所以 `-x` 永远匹配不上。
+> knockd 实际上一直活着。真正的缺陷另有其人，见 §7.6。
 
 ---
 
@@ -497,6 +500,78 @@ Windows 侧：`vms_core.dll` ABI=6，`company 128B / vehicle 312B / query 5256B`
 - 心跳**不续期** Token，TTL 1800s 到期后靠"心跳回 3 → 重登"兜底，不是提前续期。
 - keeper 只管**一条**连接；多连接（定位/视频）需要上层再建 session，内核已支持但尚未实跑。
 - C# 仍是环境变量自动登录通道；M5 应换正式登录对话框 + 凭据管理，并把 state 变化显示到状态栏。
+
+---
+
+## 7.6 knockd 崩溃修复（2026-10-22）：一个 SPA 包能打挂安全基线第一道进程
+
+### 现象与误判
+
+排查 M4「重建连接时重新敲门」时，我一度判定 knockd「一进事件循环就段错误」，
+依据是 `pgrep -x q_service_knockd` 恒为假。**这是假阴性**：
+
+- Linux 的 `/proc/pid/comm` 截断到 **15 字符**，`q_service_knockd`（16 字符）被截成
+  `q_service_knock`，`pgrep -x` 永远匹配不上。
+- 结论：knockd 空闲时**一直活着**，从来没崩过。存活判定已改用 `ps -ef | grep "[q]_service_knockd"`。
+
+真正的崩溃要**收到一个通过校验的合法 SPA 包**才触发 —— 这也是它难发现的原因：
+SPA 是静默协议（不回包），客户端侧完全无感，只剩"端口隐身整体失效"这一个症状。
+
+### 根因一：`nft_run_cmd_from_buffer` 少传 buflen（远程 DoS）
+
+`nft_min.h` 本地声明了两个符号，都是错的：
+
+| 本地声明 | nftables 真实签名（1.0.2 实测） |
+|---|---|
+| `nft_ctx_new(void)` | `nft_ctx_new(uint32_t flags)` |
+| `nft_run_cmd_from_buffer(ctx, char *buf)` | `nft_run_cmd_from_buffer(ctx, const char *buf, size_t buflen)` |
+
+自 nftables **1.0.0** 起 `nft_run_cmd_from_buffer` 是三参数。少传第三实参 →
+`rdx` 里的**未初始化垃圾值**被当 buflen，库按其解析命令缓冲区 → 越界 → 段错误。
+
+严重性：任何能构造/重放一个合法 SPA 包的来源，都能一包打挂 knockd。
+修复：显式传 `strlen` 结果。三参数调用对旧版（0.9.x 两参数）同样安全 —— 多余实参被忽略；
+`nft_ctx_new(0)` 对老版 `(void)` 亦然。
+
+### 根因二：libnftables 失败时**终止进程**而非返回错误码
+
+修完签名后仍挂，退出方式是 **SIGQUIT(3)**（不是段错误）：
+
+```
+mnl.c:60: Unable to initialize Netlink socket: Protocol not supported
+```
+
+WSL 内核无 `NETLINK_NETFILTER`。libnftables 内部打开 netlink 失败时不会返回错误码，
+而是直接把整个进程带走。**"敲门成功但门没开"退化成"敲门把门卫敲死了"**。
+
+修复：**先探测、再调用**。在 `nft_ctx_new()` 之前用一次
+`socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER)` 探测，不可用就置 `g_nft_disabled`，
+之后走「只记审计、不开门」的降级路径，进程照常存活。
+另加 `KNOCKD_NO_NFT=1` 供「netlink 可用但不想改防火墙」的联调场景。
+
+### 验证
+
+```
+# 连发 5 个合法 SPA 包
+ps -ef | grep knockd   → qiao 1116 ... bin/q_service_knockd   （存活）
+日志：5 × [INFO] SPA 授权成功 + AUDIT 链式哈希 + [WARN] nft 已降级：本次不开门
+```
+
+M4 敲门路径（`KNOCK=1 bash shell/e2e_m4.sh`）：
+
+```
+[OK] knockd 收到 3 条 SPA 记录：重建连接时确已重新敲门
+  SPA 授权成功: remote=127.0.0.1#0(uid=...) ttl=300   ← 首次登录
+  SPA 授权成功: remote=127.0.0.1#1(uid=...) ttl=300   ← 第 1 次重建
+  SPA 授权成功: remote=127.0.0.1#2(uid=...) ttl=300   ← 第 2 次重建
+```
+
+至此 M4 全部设计点均已实跑验证，无遗留未验项。
+
+### 顺带修的
+
+- `spa_send/Makefile` 硬编码 `$(SOFT_HOME)/tongsuo`，违反"依赖路径走 `DEP_HOME`"的铁律
+  （knockd 用的就是 `DEP_HOME`），导致它在交叉构建时链上 Windows 版 Tongsuo → ld 段错误。已改。
 
 ---
 
