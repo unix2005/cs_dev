@@ -129,20 +129,29 @@ printf '服务就绪：netd=%s login=9002 biz=9003\n' "$NETD_PORT"
 # WSL 里 knockd 的 seccomp/nftables 会失败（无 CAP_NET_ADMIN），但**UDP 收包照常**，
 # 足以证明"重建时确实发了格式正确的 SPA 包"。
 KNOCK="${KNOCK:-0}"
+# KNOCK_NFT=0 给 knockd 设 KNOCKD_NO_NFT=1：走「只验签记审计、不开门」的降级路径，
+# 用于 WSL 等**内核无 NETLINK_NETFILTER** 的环境 —— 那里照样能证明
+# "重建时确实发了格式正确的 SPA 包"（UDP 收包与校验不受影响）。
+# 真机默认 1（真开门）：验证完整链路 敲门 -> nft 集合出现带 TTL 的元素 -> 端口由不可达变可达。
+KNOCK_NFT="${KNOCK_NFT:-1}"
 KNOCK_ARGS=""
 if [ "$KNOCK" = "1" ]; then
     SPA_KEY="${SPA_KEY:-$CONF_DIR/spa.key}"
     KNOCK_PORT="${KNOCK_PORT:-5001}"
-    [ -f "$SPA_KEY" ] || die "缺少 SPA 密钥 $SPA_KEY（KNOCK=1 需要）"
-    # KNOCKD_NO_NFT=1：WSL 内核无 NETLINK_NETFILTER，让 knockd 走「只验签记审计、不开门」的
-    # 降级路径。UDP 收包与 SPA 校验照常，足以证明重建时确实重发了格式正确的 SPA 包。
-    # （不设也行：open_door 探测到 netlink 不可用会自动降级；显式设是为了日志更干净。）
-    KNOCKD_NO_NFT=1 "$SOFT_HOME/bin/q_service_knockd" -c "$CONF_DIR/knockd_conf.xml" \
-            >"$CONF_DIR/knockd.log" 2>&1 &
+    [ -f "$SPA_KEY" ] || die "缺少 SPA 密钥 $SPA_KEY（KNOCK=1 需要，可用 shell/prep_e2e_conf.sh 生成）"
+    if [ "$KNOCK_NFT" = "1" ]; then
+        "$SOFT_HOME/bin/q_service_knockd" -c "$CONF_DIR/knockd_conf.xml" \
+                >"$CONF_DIR/knockd.log" 2>&1 &
+    else
+        KNOCKD_NO_NFT=1 "$SOFT_HOME/bin/q_service_knockd" -c "$CONF_DIR/knockd_conf.xml" \
+                >"$CONF_DIR/knockd.log" 2>&1 &
+    fi
     PIDS="$PIDS $!"
     sleep 0.5
     KNOCK_ARGS="--knock 127.0.0.1:${KNOCK_PORT} --spakey ${SPA_KEY}"
-    printf 'knockd 已起：127.0.0.1:%s（日志 %s/knockd.log）\n' "$KNOCK_PORT" "$CONF_DIR"
+    printf 'knockd 已起：127.0.0.1:%s（日志 %s/knockd.log，%s）\n' \
+        "$KNOCK_PORT" "$CONF_DIR" \
+        "$([ "$KNOCK_NFT" = '1' ] && echo '真开门' || echo '降级：只记审计不开门')"
 fi
 
 # ---------------------------------------------------------------- 3. 跑会话治理用例
@@ -189,6 +198,29 @@ if [ "$KNOCK" = "1" ]; then
             grep -E 'SPA 授权成功|SPA 校验失败' "$CONF_DIR/knockd.log" | tail -4
         else
             printf '\033[33m[--]\033[0m knockd 存活但无收包记录：确认用例是否真的触发了重建（需跑用例3）\n'
+        fi
+
+        # 真开门模式下的**硬证据**：nft 放行集合里必须出现带 TTL 的元素。
+        # 只查日志不够 —— 曾出现「日志记 open_ok、nft 却返回失败」的相反情况
+        # （seccomp 拦了 libmnl 的 pselect6），日志与事实背离，必须落到集合本身。
+        if [ "$KNOCK_NFT" = "1" ] && command -v nft >/dev/null 2>&1; then
+            tbl=$(sed -n 's:.*<nft_table>\(.*\)</nft_table>.*:\1:p' "$CONF_DIR/knockd_conf.xml" 2>/dev/null | head -1)
+            st4=$(sed -n 's:.*<nft_set>\(.*\)</nft_set>.*:\1:p' "$CONF_DIR/knockd_conf.xml" 2>/dev/null | head -1)
+            if [ -n "$tbl" ] && [ -n "$st4" ]; then
+                # 读 nft 集合需 CAP_NET_ADMIN，普通用户会 "Operation not permitted"，
+                # 故先直连、失败再退回 sudo -n。
+                # 注意：grep -c 无匹配时退出码为 1，若写成 `|| echo 0` 会追加第二个 0，
+                # 变量变成 "0\n0" → [: integer expression expected。用 `|| true` 兜底。
+                out=$(nft list set "$tbl" "$st4" 2>/dev/null ||
+                      sudo -n nft list set "$tbl" "$st4" 2>/dev/null)
+                el=$(printf '%s' "$out" | grep -c 'expires' || true)
+                if [ "${el:-0}" -gt 0 ]; then
+                    printf '\033[32m[OK]\033[0m nft 放行集合 %s %s 内有 %s 个带 TTL 的元素（门真开了）\n' "$tbl" "$st4" "$el"
+                    printf '%s\n' "$out" | grep 'expires' | head -3
+                else
+                    printf '\033[31m[FAIL]\033[0m nft 放行集合无元素 —— 敲门成功但门没开（查 CAP_NET_ADMIN 与集合是否预创建）\n'
+                fi
+            fi
         fi
     fi
 fi
