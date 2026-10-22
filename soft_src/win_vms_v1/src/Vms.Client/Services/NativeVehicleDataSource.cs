@@ -21,12 +21,24 @@ internal sealed class NativeVehicleDataSource : IVehicleDataSource
         _client = client;
         _version = version;
         _client.VehiclesPushed += (s, e) => VehiclesPushed?.Invoke(this, e);
+        // M4：会话状态（在线 / 重连中 / 已断开）由 native 心跳线程发出，
+        // VmsCoreClient 已编组回 UI 线程，这里只做转发。
+        _client.SessionStateChanged += (s, e) => SessionStateChanged?.Invoke(this, e);
     }
 
     public string BackendName => $"native v{_version}";
     public bool IsNative => true;
 
     public event EventHandler<IReadOnlyList<VehicleRow>>? VehiclesPushed;
+
+    /// <summary>M4：会话治理状态变化（已在 UI 线程）。</summary>
+    public event EventHandler<SessionStatus>? SessionStateChanged;
+
+    /// <summary>M4：读取当前会话状态（心跳/重连/重登计数）。</summary>
+    public SessionStatus GetSessionStatus() => _client.GetSessionStatus();
+
+    /// <summary>M4：立即重连（用户点了"重试"时）。</summary>
+    public void WakeSession() => _client.WakeKeeper();
 
     public Task<SystemStats> GetStatsAsync(CancellationToken ct = default)
         => Task.Run(_client.GetStats, ct);

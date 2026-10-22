@@ -82,6 +82,51 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial int vms_query_vehicles(IntPtr ctx, in NativeQuery query, IntPtr buffer, nuint cap, out nuint count);
 
+    // --------------------------- M4：会话治理（ABI v6） ---------------------------
+    // 回调走函数指针（与 vms_subscribe 同一套路）：由 [UnmanagedCallersOnly] 静态方法
+    // 取得指针，配 GCHandle 找回实例 —— 不持有托管委托，不会被 GC 回收导致崩溃。
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_keeper_start")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_keeper_start(IntPtr ctx, in NativeKeeperCfg cfg);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_keeper_stop")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_keeper_stop(IntPtr ctx);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_keeper_wake")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_keeper_wake(IntPtr ctx);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_get_session_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_get_session_info(IntPtr ctx, out NativeSessionInfo info);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_set_session_callback")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_set_session_callback(IntPtr ctx, IntPtr callback, IntPtr userData);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_set_relogin_callback")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_set_relogin_callback(IntPtr ctx, IntPtr callback, IntPtr userData);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_lock")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_lock(IntPtr ctx);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_unlock")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_unlock(IntPtr ctx);
+
+    /// <summary>
+    /// PBKDF2-SM3 派生（仅本地运算）。重登回调里用它把缓存的口令派生成 pwd_hash ——
+    /// 口令因此<b>不需要</b>交给 native 长期保存。
+    /// </summary>
+    [LibraryImport(LibraryName, EntryPoint = "vms_derive_pwd_hash", StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_derive_pwd_hash(string password, IntPtr salt, nuint saltLen,
+                                                  uint iter, IntPtr outHash);
+
     // ------------------------------- 推送 / 日志 -------------------------------
 
     [LibraryImport(LibraryName, EntryPoint = "vms_subscribe")]

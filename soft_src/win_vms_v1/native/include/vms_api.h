@@ -40,7 +40,10 @@ extern "C" {
 #endif
 
 /* --------------------------------- 版本 ----------------------------------- */
-/* v5：vms_query.ids 由 uint32[] 改为「库表主键字符串数组」char[][VMS_KEY_MAX]，
+/* v6：新增会话治理（M4）：vms_keeper_start/stop、vms_get_session_info、
+        vms_set_session_callback / vms_set_relogin_callback、vms_lock/unlock、
+        vms_derive_pwd_hash。仅新增函数与结构（尾部追加），不改既有布局。
+    v5：vms_query.ids 由 uint32[] 改为「库表主键字符串数组」char[][VMS_KEY_MAX]，
        并新增 vms_query.org_id（d_org_info.org_id，子树根）。
    原因：d_vehicleinfo.vehicle_id 是 CHAR(32)，注释原文「车辆ID，车牌号+颜色」，
         即 `京A12345-1` 这种**非数字**业务主键。v4 用 uint32 + "%06u" 反向编码只是桩服务的
@@ -50,7 +53,7 @@ extern "C" {
         新字段 org_id 仍放在结构体尾部，v4 调用方不碰 ids 时可继续编译。
    v4：vms_company 追加 org_id、vms_vehicle 追加 vehicle_id/org_id（M3 业务列表）。
    v3：新增 vms_credentials + vms_login/vms_logout/vms_heartbeat（M1 登录闭环）。 */
-#define VMS_ABI_VERSION  5u
+#define VMS_ABI_VERSION  6u
 #define VMS_VER_MAJOR    1
 #define VMS_VER_MINOR    1
 #define VMS_VER_PATCH    0
@@ -204,6 +207,59 @@ typedef struct vms_credentials {
     uint32_t reserved;
 } vms_credentials;
 
+/* ======================== M4：会话治理（Session Keeper） ========================
+ * 背景：协议严格 lockstep（一问一答），后台 Token 有 TTL(1800s) 且心跳**不续期**，
+ *       客户端又有多个业务线程（列表 / 定位 / 视频）。把心跳、断线退避重连、
+ *       Token 失效自动重登、请求串行化收敛在通信内核（l_4 q_clientcomm），三端共用。
+ *
+ * 状态机：
+ *   ONLINE        --心跳ok--> ONLINE
+ *                 --心跳返回3--> REAUTHING     : 原连接上重发 SALT+LOGIN（不拆连接）
+ *                 --心跳失败-->  RECONNECTING  : 退避后重建链路（含重新敲门）
+ *   REAUTHING     --重登ok--> ONLINE；失败 --> RECONNECTING
+ *   RECONNECTING  --重建ok--> ONLINE；超限 --> OFFLINE
+ *   OFFLINE       --vms_keeper_wake/重新登录--> 恢复
+ *
+ * 口令红线：内核**不保存口令，也不保存派生值**。自动重登需要的 pwd_hash 通过
+ *           vms_relogin_cb 向 UI 索取（UI 可缓存口令 / 弹窗重输 / 读系统凭据管理器）。
+ *           回调返回非 0 = 无法提供，会话转 OFFLINE，UI 应弹登录框。
+ */
+typedef enum vms_session_state {
+    VMS_SS_IDLE         = 0,  /* 未登录 / keeper 未启动 */
+    VMS_SS_ONLINE       = 1,  /* 已认证，心跳正常 */
+    VMS_SS_RECONNECTING = 2,  /* 连接不可用，退避重连中 */
+    VMS_SS_REAUTHING    = 3,  /* Token 失效，重新登录中 */
+    VMS_SS_OFFLINE      = 4   /* 连续失败超上限或缺凭据，需 UI 介入 */
+} vms_session_state;
+
+typedef struct vms_session_info {
+    int32_t  state;             /* vms_session_state */
+    uint32_t attempts;          /* 当前连续失败次数 */
+    uint32_t hb_sent;           /* 已发心跳次数 */
+    uint32_t hb_failed;         /* 心跳失败次数 */
+    uint32_t reconnects;        /* 重建连接成功次数 */
+    uint32_t relogins;          /* 自动重新登录成功次数 */
+    uint64_t last_ok_ms;        /* 最近一次成功的单调时刻（进程内相对值，非墙上时间） */
+    uint64_t next_hb_ms;        /* 下次心跳时刻 */
+    uint64_t next_retry_ms;     /* 下次重连时刻（RECONNECTING 有效） */
+    char     detail[96];        /* 最近一次事件描述（UTF-8） */
+} vms_session_info;
+
+typedef struct vms_keeper_cfg {
+    uint32_t hb_interval_sec;   /* 心跳间隔；0 = 默认 60 */
+    uint32_t backoff_base_sec;  /* 退避基数；0 = 默认 1（序列 1/2/4/8/16/30 封顶） */
+    uint32_t backoff_max_sec;   /* 退避上限；0 = 默认 30 */
+    uint32_t max_retry;         /* 连续失败多少次转 OFFLINE；0 = 无限重连 */
+    uint32_t tick_ms;           /* 主循环轮询间隔；0 = 默认 500 */
+    uint32_t fault;             /* 故障注入（联调用，见 VMS_FAULT_*）；生产恒 0 */
+} vms_keeper_cfg;
+
+/* 故障注入位（仅供联调 / 冒烟脚本，用于验证重连与重登路径） */
+#define VMS_FAULT_NONE         0x0000u
+#define VMS_FAULT_HB_FAIL      0x0001u  /* 心跳视为断连 */
+#define VMS_FAULT_HB_RC3       0x0002u  /* 心跳返回结果码 3（Token 过期） */
+#define VMS_FAULT_RELOGIN_FAIL 0x0004u  /* 重登必定失败 */
+
 typedef struct vms_context vms_context; /* 不透明句柄（opaque handle） */
 
 #pragma pack(pop)
@@ -215,7 +271,9 @@ typedef enum vms_struct_kind {
     VMS_STRUCT_COMPANY  = 3,
     VMS_STRUCT_VEHICLE  = 4,
     VMS_STRUCT_QUERY    = 5,
-    VMS_STRUCT_CREDENTIALS = 6
+    VMS_STRUCT_CREDENTIALS = 6,
+    VMS_STRUCT_SESSION_INFO = 7,     /* v6：M4 会话状态（state / 统计 / 事件描述） */
+    VMS_STRUCT_KEEPER_CFG  = 8       /* v6：M4 会话治理参数 */
 } vms_struct_kind;
 
 /* ------------------------------- 回调类型 --------------------------------- */
@@ -223,6 +281,19 @@ typedef enum vms_struct_kind {
 typedef void (VMS_CALL *vms_push_cb)(const vms_vehicle* items, size_t count, void* user_data);
 /* 日志回调，level: 0=debug 1=info 2=warn 3=error */
 typedef void (VMS_CALL *vms_log_cb)(int32_t level, const char* msg, void* user_data);
+
+/* M4：会话状态变化回调。**由 native 心跳线程调用**，实现方必须自行编组到 UI 线程
+   （C#: DispatcherQueue；GTK: g_idle_add；macOS: dispatch_async）——
+   在该回调里直接碰 UI 控件必然崩（WinUI3 会抛 RPC_E_WRONG_THREAD）。
+   state 见 vms_session_state；rc: 0 正常 / >0 服务端结果码 / <0 断连。 */
+typedef void (VMS_CALL *vms_session_cb)(int32_t state, int32_t rc, const char* msg, void* user_data);
+
+/* M4：重新登录时向 UI 索取口令派生值。
+   UI 侧实现：拿自己缓存的口令 + 传入的 salt 调 vms_derive_pwd_hash() 填 pwd_hash_out。
+   返回 0 = 已填好；非 0 = 无法提供（口令未缓存 / 用户取消）→ 会话转 OFFLINE。
+   注意：pwd_hash_out 是 32 字节调用方缓冲，写满即可；内核用完即清零。 */
+typedef int  (VMS_CALL *vms_relogin_cb)(const uint8_t* salt, size_t salt_len, uint32_t iter,
+                                        uint8_t pwd_hash_out[32], void* user_data);
 
 /* -------------------------------- 生命周期 -------------------------------- */
 VMS_API uint32_t    VMS_CALL vms_abi_version(void);
@@ -247,8 +318,47 @@ VMS_API int32_t VMS_CALL vms_is_connected(const vms_context* ctx);
 VMS_API int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred);
 /* 登出（保持 TCP 连接可复用）；返回 VMS_OK 或负错误码 */
 VMS_API int32_t VMS_CALL vms_logout(vms_context* ctx);
-/* 心跳保活；注意：后台心跳**不续期** Token，TTL(1800s) 到期后业务会返回 3 */
+/* 心跳保活；注意：后台心跳**不续期** Token，TTL(1800s) 到期后业务会返回 3。
+   M4 起：keeper 已启动时本函数返回最近一次心跳的结果（不发新心跳，避免与 keeper 抢锁）；
+   keeper 未启动则同步发一次心跳。返回 0 = 最近心跳正常；>0 服务端结果码；<0 本库错误码。 */
 VMS_API int32_t VMS_CALL vms_heartbeat(vms_context* ctx);
+
+/* -------------------------- M4：会话治理 -------------------------- */
+/* 启动会话治理线程（心跳 + 退避重连 + Token 失效自动重登）。
+   vms_login 成功后会**自动**按默认参数启动（60s 心跳 / 1s 起 30s 封顶退避 / 无限重连）；
+   需要改参数时，在 login **之前**调用本函数传入 cfg（cfg 可为 NULL = 全默认）。
+   返回 VMS_OK 已启动；VMS_ERR_INVALID_ARG 未登录；VMS_ERR_INTERNAL 线程创建失败
+   （此时门面仍可用，只是失去自动治理 —— 降级，不致命）。 */
+VMS_API int32_t VMS_CALL vms_keeper_start(vms_context* ctx, const vms_keeper_cfg* cfg);
+/* 停止治理线程（幂等）。登出/销毁前会自动调用。 */
+VMS_API int32_t VMS_CALL vms_keeper_stop(vms_context* ctx);
+/* 唤醒治理线程立即动作（立即心跳 / 立即重连；OFFLINE 时给一轮新的重试机会）。 */
+VMS_API int32_t VMS_CALL vms_keeper_wake(vms_context* ctx);
+/* 读取会话状态与统计。 */
+VMS_API int32_t VMS_CALL vms_get_session_info(vms_context* ctx, vms_session_info* out_info);
+
+/* 注册会话状态回调（状态变化由 native 线程发出，实现方须编组到 UI 线程）。
+   建议在 vms_login **之前**注册，以便收到"建立 / 重连 / 掉线"全过程。 */
+VMS_API int32_t VMS_CALL vms_set_session_callback(vms_context* ctx,
+                                                  vms_session_cb cb, void* user_data);
+/* 注册重新登录凭据回调。**必须在 vms_login 之前注册**，否则 Token 过期无法自动重登，
+   会话会转 OFFLINE。 */
+VMS_API int32_t VMS_CALL vms_set_relogin_callback(vms_context* ctx,
+                                                  vms_relogin_cb cb, void* user_data);
+
+/* 串行化 gate：多线程调用业务接口时，用这一对函数包住一次完整的请求-响应，
+   避免两路请求交错破坏 lockstep 协议（表现为偶发解包错位 / 卡死）。
+   单次业务接口（vms_get_stats 等）内部已经自己加锁，本接口供调用方把
+   「多次调用」合并成原子序列时用（例如先查组织树再查车辆）。 */
+VMS_API int32_t VMS_CALL vms_lock(vms_context* ctx);
+VMS_API int32_t VMS_CALL vms_unlock(vms_context* ctx);
+
+/* PBKDF2-SM3 派生（仅本地运算）：供 vms_relogin_cb 的实现方把口令派生成 pwd_hash。
+   口令不出 UI 进程到 native 的长期存储 —— 这也是自动重登必须由 UI 提供 pwd_hash 的原因。
+   返回 VMS_OK；失败返回负错误码。 */
+VMS_API int32_t VMS_CALL vms_derive_pwd_hash(const char* password,
+                                             const uint8_t* salt, size_t salt_len,
+                                             uint32_t iter, uint8_t out_hash[32]);
 
 /* --------------------------------- 数据 ---------------------------------- */
 /* 全量统计。

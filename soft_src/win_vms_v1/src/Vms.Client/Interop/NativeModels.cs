@@ -36,6 +36,8 @@ internal enum NativeStructKind
     Vehicle = 4,
     Query = 5,
     Credentials = 6,
+    SessionInfo = 7,   // v6：M4 会话状态
+    KeeperCfg = 8,     // v6：M4 会话治理参数
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -156,6 +158,50 @@ internal unsafe struct NativeCredentials
     public fixed byte SpaKeyPath[PathMax];  // SPA 密钥文件（随 Knock 使用）
     public uint Pbkdf2Iter;                 // 0 = 用协议默认 100000
     public uint Reserved;
+}
+
+/// <summary>M4：会话状态（对应 <c>vms_session_state</c>）。</summary>
+internal enum NativeSessionState
+{
+    Idle = 0,          // 未登录 / keeper 未启动
+    Online = 1,        // 已认证，心跳正常
+    Reconnecting = 2,  // 连接不可用，退避重连中
+    Reauthing = 3,     // Token 失效，重新登录中
+    Offline = 4,       // 连续失败超上限或缺凭据，需 UI 介入
+}
+
+/// <summary>
+/// M4：会话状态与统计（对应 <c>vms_session_info</c>，ABI v6）。
+/// 时间字段是 native 进程内的<b>单调毫秒</b>（GetTickCount64 / CLOCK_MONOTONIC），
+/// 不是墙上时间 —— 只能用来算间隔，不要当日期显示。
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeSessionInfo
+{
+    public const int DetailMax = 96;
+
+    public int State;
+    public uint Attempts;
+    public uint HbSent;
+    public uint HbFailed;
+    public uint Reconnects;
+    public uint Relogins;
+    public ulong LastOkMs;
+    public ulong NextHbMs;
+    public ulong NextRetryMs;
+    public fixed byte Detail[DetailMax];
+}
+
+/// <summary>M4：会话治理参数（对应 <c>vms_keeper_cfg</c>）。全 0 = 交给 native 取默认。</summary>
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal struct NativeKeeperCfg
+{
+    public uint HbIntervalSec;   // 0 = 60
+    public uint BackoffBaseSec;  // 0 = 1（序列 1/2/4/8/16/30 封顶，带 ±20% 抖动）
+    public uint BackoffMaxSec;   // 0 = 30
+    public uint MaxRetry;        // 0 = 无限重连
+    public uint TickMs;          // 0 = 500
+    public uint Fault;           // 故障注入，生产恒 0
 }
 
 /// <summary>从 <c>fixed byte[]</c> 读 UTF-8 字符串的小工具，零分配读取路径。</summary>

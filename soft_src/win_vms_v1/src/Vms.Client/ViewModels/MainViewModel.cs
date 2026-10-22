@@ -19,6 +19,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private string _statusMessage = "欢迎访问车辆管理系统！";
     private string _backendBadge = "未初始化";
     private bool _usingNativeBackend;
+    private SessionStatus? _sessionState;
 
     public MainViewModel(DispatcherQueue? uiQueue)
     {
@@ -30,6 +31,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             : $"已降级为内置模拟数据 · {_bundle.Probe.Message}";
 
         Monitor = new RealtimeMonitorViewModel(_bundle.Source, uiQueue);
+
+        // M4：订阅会话状态（在线 / 重连中 / 票据失效重登 / 已断开）。
+        // 回调由 native 心跳线程发出，VmsCoreClient 已编组回 UI 线程，这里只做赋值。
+        if (_bundle.Source is NativeVehicleDataSource nativeSource)
+            nativeSource.SessionStateChanged += (_, s) => SessionState = s;
 
         BuildNavigation();
 
@@ -84,6 +90,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public string BackendBadge { get => _backendBadge; private set => SetProperty(ref _backendBadge, value); }
 
     public bool UsingNativeBackend { get => _usingNativeBackend; private set => SetProperty(ref _usingNativeBackend, value); }
+
+    /// <summary>M4：会话治理状态（null = 未登录 / 无会话治理）。</summary>
+    public SessionStatus? SessionState
+    {
+        get => _sessionState;
+        private set
+        {
+            if (!SetProperty(ref _sessionState, value)) return;
+            OnPropertyChanged(nameof(SessionText));
+            OnPropertyChanged(nameof(SessionIsDown));
+        }
+    }
+
+    /// <summary>状态栏用的会话文案（"在线" / "连接中断，正在重连" / "已断开"）。</summary>
+    public string SessionText => _sessionState?.StateText ?? "未连接";
+
+    /// <summary>会话是否处于异常态（重连中 / 重登中 / 已断开）—— 供状态栏变色。</summary>
+    public bool SessionIsDown => _sessionState?.IsDown ?? false;
 
     /// <summary>native 自检细节（状态栏 tooltip / 诊断面板用）。</summary>
     public string NativeDiagnostics => _bundle.Probe.Success
@@ -179,6 +203,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         try
         {
             Stats = await _bundle.Source.GetStatsAsync(ct);
+
+            // M4：顺带刷新会话状态（只是一次内存快照，无网络往返）。
+            // 状态变化本身由事件推送，这里是兜底 —— 避免事件丢帧后状态栏一直停在旧值。
+            if (_bundle.Source is NativeVehicleDataSource nds && nds.IsLoggedIn)
+                SessionState = nds.GetSessionStatus();
         }
         catch (Exception ex)
         {

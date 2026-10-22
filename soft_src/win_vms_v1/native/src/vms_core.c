@@ -91,6 +91,21 @@ struct vms_context {
     char          spa_key_path[VMS_PATH_MAX];
     uint32_t      pbkdf2_iter;
 
+    /* —— M4：会话治理 —— */
+    vms_keeper_cfg keeper_cfg;      /* UI 预设的治理参数（vms_keeper_start 传入） */
+    int32_t        keeper_cfg_set;  /* 1 = UI 已预设，login 后按其启动；0 = 用全默认 */
+    int32_t        keeper_on;       /* keeper 线程是否在运行 */
+    vms_session_cb session_cb;      /* 状态变化回调（由 native 心跳线程发出） */
+    void*          session_user;
+    vms_relogin_cb relogin_cb;      /* 重登取 pwd_hash（令牌过期时用） */
+    void*          relogin_user;
+    /* 重连材料（**不含口令**）：SPA 密钥与设备指纹，供断线自动重连时重新敲门/登录 */
+    uint8_t        spa_key[32];
+    size_t         spa_key_len;
+    uint8_t        devid[32];
+    size_t         devid_len;
+    uint32_t       last_hb_rc;      /* 最近一次心跳结果（keeper 运行时由线程更新） */
+
 #ifdef _WIN32
     CRITICAL_SECTION lock;
     HANDLE           push_thread;
@@ -333,6 +348,8 @@ size_t VMS_CALL vms_struct_size(int32_t kind)
     case VMS_STRUCT_VEHICLE:  return sizeof(vms_vehicle);
     case VMS_STRUCT_QUERY:    return sizeof(vms_query);
     case VMS_STRUCT_CREDENTIALS: return sizeof(vms_credentials);
+    case VMS_STRUCT_SESSION_INFO: return sizeof(vms_session_info);
+    case VMS_STRUCT_KEEPER_CFG:  return sizeof(vms_keeper_cfg);
     default:                  return 0;
     }
 }
@@ -498,13 +515,114 @@ static int vms_split_ep(const char* s, char* host, size_t cap, int* port)
     return (*port > 0) ? 0 : -1;
 }
 
-/* 关闭并释放真实会话（幂等）；Token 立即清零 */
+/* 关闭并释放真实会话（幂等）；Token 与 SPA 密钥立即清零。
+   M4：先停 keeper 线程 —— 否则心跳线程会继续摸这条正在销毁的连接。 */
 static void vms_session_close(struct vms_context* ctx)
 {
     if (!ctx) return;
-    if (ctx->sess) { qc_session_destroy(ctx->sess); ctx->sess = NULL; }
-    ctx->logged_in = 0;
+    if (ctx->sess)
+    {
+        qc_keeper_stop(ctx->sess);
+        qc_session_destroy(ctx->sess);
+        ctx->sess = NULL;
+    }
+    ctx->logged_in  = 0;
+    ctx->keeper_on  = 0;
+    ctx->connected  = 0;
+    ctx->last_hb_rc = 0;
     memset(ctx->token, 0, sizeof(ctx->token));
+    memset(ctx->spa_key, 0, sizeof(ctx->spa_key));
+    ctx->spa_key_len = 0u;
+}
+
+/* ==================== M4：会话治理（心跳 / 重连 / 重登） ==================== */
+
+/* native -> UI 的重登凭据回调适配：pwd_hash 由 UI 提供，内核不碰口令 */
+static int vms_on_relogin(void* ud, const uint8_t* salt, size_t salt_len,
+                          uint32_t iter, uint8_t pwd_hash_out[32])
+{
+    struct vms_context* ctx = (struct vms_context*)ud;
+    if (!ctx || !ctx->relogin_cb)
+        return -1;
+    return ctx->relogin_cb(salt, salt_len, iter, pwd_hash_out, ctx->relogin_user);
+}
+
+/* keeper 线程 -> UI 的状态回调适配。
+   注意：本函数跑在 native 心跳线程上，UI 侧实现必须自行编组到 UI 线程
+   （C# 用 DispatcherQueue，GTK 用 g_idle_add），直接碰控件必然崩。 */
+static void vms_on_state(void* ud, int state, int rc, const char* msg)
+{
+    struct vms_context* ctx = (struct vms_context*)ud;
+    if (!ctx) return;
+    if (state == VMS_SS_ONLINE)
+        ctx->last_hb_rc = (rc > 0) ? (uint32_t)rc : 0u;
+    if (ctx->session_cb)
+        ctx->session_cb((int32_t)state, (int32_t)rc, msg ? msg : "", ctx->session_user);
+}
+
+/* 把重连材料（**不含口令**）登记到通信内核 */
+static void vms_keeper_fill_reconnect(struct vms_context* ctx)
+{
+    qc_reconnect_t ri;
+
+    if (!ctx || !ctx->sess) return;
+    memset(&ri, 0, sizeof(ri));
+    snprintf(ri.host, sizeof(ri.host), "%s", ctx->host);
+    ri.port = ctx->port;
+    snprintf(ri.user, sizeof(ri.user), "%s", ctx->user);
+    snprintf(ri.knock, sizeof(ri.knock), "%s", ctx->knock);
+    if (ctx->spa_key_len > 0u && ctx->spa_key_len <= sizeof(ri.spa_key))
+    {
+        memcpy(ri.spa_key, ctx->spa_key, ctx->spa_key_len);
+        ri.spa_key_len = ctx->spa_key_len;
+    }
+    if (ctx->devid_len > 0u && ctx->devid_len <= sizeof(ri.devid))
+    {
+        memcpy(ri.devid, ctx->devid, ctx->devid_len);
+        ri.devid_len = ctx->devid_len;
+    }
+    snprintf(ri.cver, sizeof(ri.cver), "vms_core/%d.%d", VMS_VER_MAJOR, VMS_VER_MINOR);
+    ri.pbkdf2_iter = ctx->pbkdf2_iter;
+    (void)qc_set_reconnect_info(ctx->sess, &ri);
+    memset(&ri, 0, sizeof(ri));   /* 含 SPA 密钥，用完即清 */
+}
+
+/* 登录成功后启动会话治理；cfg 来自 UI 预设（vms_keeper_start）或全默认 */
+static int32_t vms_keeper_boot(struct vms_context* ctx)
+{
+    qc_keeper_cfg_t kc;
+    int             rc;
+
+    if (!ctx || !ctx->sess) return VMS_ERR_NOT_CONNECTED;
+
+    memset(&kc, 0, sizeof(kc));
+    kc.hb_interval_sec  = (ctx->keeper_cfg_set && ctx->keeper_cfg.hb_interval_sec)
+                          ? ctx->keeper_cfg.hb_interval_sec : 60u;
+    kc.backoff_base_sec = (ctx->keeper_cfg_set && ctx->keeper_cfg.backoff_base_sec)
+                          ? ctx->keeper_cfg.backoff_base_sec : 1u;
+    kc.backoff_max_sec  = (ctx->keeper_cfg_set && ctx->keeper_cfg.backoff_max_sec)
+                          ? ctx->keeper_cfg.backoff_max_sec : 30u;
+    kc.max_retry        = (ctx->keeper_cfg_set) ? ctx->keeper_cfg.max_retry : 0u;
+    kc.tick_ms          = (ctx->keeper_cfg_set && ctx->keeper_cfg.tick_ms)
+                          ? ctx->keeper_cfg.tick_ms : 500u;
+    kc.fault            = (ctx->keeper_cfg_set) ? ctx->keeper_cfg.fault : 0u;
+    kc.on_relogin       = ctx->relogin_cb ? vms_on_relogin : NULL;
+    kc.relogin_ud       = ctx;
+    kc.on_state         = ctx->session_cb ? vms_on_state : NULL;
+    kc.state_ud         = ctx;
+
+    rc = qc_keeper_start(ctx->sess, &kc);
+    if (rc != 0)
+    {
+        /* 线程创建失败只是"失去自动治理"，门面仍可用 —— 降级但不致命，
+           故不写 g_last_error（否则一次成功的登录会带着一条错误串） */
+        if (ctx->log_cb)
+            ctx->log_cb(2, "会话治理线程启动失败，已降级为无自动心跳/重连", ctx->log_user);
+        return (rc == -2) ? VMS_ERR_INTERNAL : VMS_ERR_NOT_CONNECTED;
+    }
+
+    ctx->keeper_on = 1;
+    return VMS_OK;
 }
 
 int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred)
@@ -542,6 +660,10 @@ int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred)
         devid_len = 11u;
     }
     iter = cred->pbkdf2_iter ? cred->pbkdf2_iter : Q_PBKDF2_ITER_DEFAULT;
+
+    /* M4：留存设备指纹，供断线自动重连时重新登录（口令**不**留存） */
+    memcpy(ctx->devid, devid, devid_len);
+    ctx->devid_len = devid_len;
 
     /* 服务端静态公钥：握手时校验服务端身份，抗中间人 —— 必须内置/随客户端分发 */
     pub = vms_read_file(cred->pubkey_path, &pub_len);
@@ -589,6 +711,9 @@ int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred)
             memcpy(key, kb, keylen);
             memset(kb, 0, keylen);
             free(kb);
+            /* M4：留存 SPA 密钥，断线重建时要重新敲门（放行条目有 TTL，过期就连不上） */
+            memcpy(ctx->spa_key, key, keylen);
+            ctx->spa_key_len = keylen;
         }
         memset(uid, 0, sizeof(uid));
         ulen = strlen(cred->user);
@@ -667,6 +792,11 @@ int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred)
     snprintf(ctx->spa_key_path, sizeof(ctx->spa_key_path), "%s", cred->spa_key_path);
     ctx->pbkdf2_iter = iter;
     g_last_error[0] = '\0';
+
+    /* M4：登记重连材料（不含口令）+ 启动会话治理（心跳 / 退避重连 / Token 失效重登）。
+       治理线程启动失败不影响登录结果，只是失去自动保活 —— 已由内部记录日志。 */
+    vms_keeper_fill_reconnect(ctx);
+    (void)vms_keeper_boot(ctx);
     return VMS_OK;
 }
 
@@ -685,12 +815,134 @@ int32_t VMS_CALL vms_logout(vms_context* ctx)
 
 int32_t VMS_CALL vms_heartbeat(vms_context* ctx)
 {
-    int rc;
-
     if (!ctx || !ctx->sess) return VMS_ERR_NOT_CONNECTED;
-    rc = qc_heartbeat(ctx->sess);
-    if (rc < 0) return VMS_ERR_NOT_CONNECTED;
-    return rc;   /* 0 = OK；>0 = 服务端结果码 */
+
+    /* M4：keeper 已接管心跳时，本函数只汇报最近状态 ——
+       再发一次心跳会和 keeper 抢 gate，且 UI 拿到的也不是它自己触发的那次结果。 */
+    if (ctx->keeper_on)
+    {
+        qc_keeper_stat_t st;
+        if (qc_keeper_state(ctx->sess, &st) != 0)
+            return VMS_ERR_INTERNAL;
+        if (st.state == QC_STATE_ONLINE)     return VMS_OK;
+        if (st.state == QC_STATE_OFFLINE)    return VMS_ERR_NOT_CONNECTED;
+        return (int32_t)ctx->last_hb_rc;     /* 重连/重登进行中：汇报最近的结果码 */
+    }
+
+    {
+        int rc;
+        qc_keeper_lock(ctx->sess);
+        rc = qc_heartbeat(ctx->sess);
+        qc_keeper_unlock(ctx->sess);
+        if (rc < 0) return VMS_ERR_NOT_CONNECTED;
+        ctx->last_hb_rc = (uint32_t)rc;
+        return rc;
+    }
+}
+
+/* ---------------------- M4：会话治理对外函数实现 ---------------------- */
+
+int32_t VMS_CALL vms_keeper_start(vms_context* ctx, const vms_keeper_cfg* cfg)
+{
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+
+    /* 允许在 login 之前预设参数：记下来，登录成功后按此启动 */
+    if (cfg)
+    {
+        memset(&ctx->keeper_cfg, 0, sizeof(ctx->keeper_cfg));
+        memcpy(&ctx->keeper_cfg, cfg, sizeof(ctx->keeper_cfg));
+        ctx->keeper_cfg_set = 1;
+    }
+
+    if (!ctx->sess || !ctx->logged_in)
+        return VMS_OK;                  /* 尚未登录：参数已记下，登录后自动生效 */
+
+    return vms_keeper_boot(ctx);
+}
+
+int32_t VMS_CALL vms_keeper_stop(vms_context* ctx)
+{
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    if (!ctx->sess) return VMS_OK;
+    qc_keeper_stop(ctx->sess);
+    ctx->keeper_on = 0;
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_keeper_wake(vms_context* ctx)
+{
+    if (!ctx || !ctx->sess) return VMS_ERR_NOT_CONNECTED;
+    return (qc_keeper_wake(ctx->sess) == 0) ? VMS_OK : VMS_ERR_NOT_CONNECTED;
+}
+
+int32_t VMS_CALL vms_get_session_info(vms_context* ctx, vms_session_info* out_info)
+{
+    qc_keeper_stat_t st;
+
+    if (!ctx || !out_info) return VMS_ERR_INVALID_ARG;
+    memset(out_info, 0, sizeof(*out_info));
+
+    if (!ctx->sess)
+    {
+        out_info->state = VMS_SS_IDLE;
+        return VMS_OK;
+    }
+    if (qc_keeper_state(ctx->sess, &st) != 0)
+        return VMS_ERR_INTERNAL;
+
+    out_info->state         = (int32_t)st.state;
+    out_info->attempts      = st.attempts;
+    out_info->hb_sent       = st.hb_sent;
+    out_info->hb_failed     = st.hb_failed;
+    out_info->reconnects    = st.reconnects;
+    out_info->relogins      = st.relogins;
+    out_info->last_ok_ms    = st.last_ok_ms;
+    out_info->next_hb_ms    = st.next_hb_ms;
+    out_info->next_retry_ms = st.next_retry_ms;
+    snprintf(out_info->detail, sizeof(out_info->detail), "%s", st.detail);
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_set_session_callback(vms_context* ctx, vms_session_cb cb, void* user_data)
+{
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    ctx->session_cb   = cb;
+    ctx->session_user = user_data;
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_set_relogin_callback(vms_context* ctx, vms_relogin_cb cb, void* user_data)
+{
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    ctx->relogin_cb   = cb;
+    ctx->relogin_user = user_data;
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_lock(vms_context* ctx)
+{
+    if (!ctx || !ctx->sess) return VMS_ERR_NOT_CONNECTED;
+    return (qc_keeper_lock(ctx->sess) == 0) ? VMS_OK : VMS_ERR_INTERNAL;
+}
+
+int32_t VMS_CALL vms_unlock(vms_context* ctx)
+{
+    if (!ctx || !ctx->sess) return VMS_ERR_NOT_CONNECTED;
+    return (qc_keeper_unlock(ctx->sess) == 0) ? VMS_OK : VMS_ERR_INTERNAL;
+}
+
+int32_t VMS_CALL vms_derive_pwd_hash(const char* password, const uint8_t* salt, size_t salt_len,
+                                     uint32_t iter, uint8_t out_hash[32])
+{
+    if (!password || !salt || salt_len == 0u || !out_hash) return VMS_ERR_INVALID_ARG;
+    if (qc_pbkdf2_sm3((const uint8_t*)password, strlen(password),
+                      salt, salt_len,
+                      iter ? iter : (uint32_t)Q_PBKDF2_ITER_DEFAULT, out_hash) != 0)
+    {
+        set_error("PBKDF2-SM3 派生失败", VMS_ERR_INTERNAL);
+        return VMS_ERR_INTERNAL;
+    }
+    return VMS_OK;
 }
 
 /* ==================== M2：真实业务查询（BIZ_QUERY + cJSON） ==================== */
@@ -951,8 +1203,26 @@ static char *vms_biz_call(struct vms_context *ctx, const char *biz_type,
     resp = (uint8_t *)malloc(VMS_BIZ_BUF_MAX);
     if (!resp) { set_error("内存不足", VMS_ERR_NO_MEMORY); *out_rc = VMS_ERR_NO_MEMORY; return NULL; }
 
+    /*
+     * M4：整次请求-响应都在 gate 内完成 ——
+     *   1) 与心跳线程互斥，保证 lockstep 不被并发插入破坏；
+     *   2) 结果码 3（Token 失效）时能在**同一段互斥区**里同步重新登录并原样重试一次，
+     *      调用方感知不到"Token 过期"这回事（这对运维体验是关键：不该让人手动重登）。
+     */
+    qc_keeper_lock(ctx->sess);
     rc = qc_biz_query(ctx->sess, biz_type, param_json, offset, limit,
                       resp, VMS_BIZ_BUF_MAX, &rlen);
+    if (rc == (int)Q_IPC_R_UNAUTHORIZED)
+    {
+        int r2 = qc_keeper_note_result(ctx->sess, rc);
+        if (r2 == 0)
+            rc = qc_biz_query(ctx->sess, biz_type, param_json, offset, limit,
+                              resp, VMS_BIZ_BUF_MAX, &rlen);   /* 重登成功：重试一次 */
+        else
+            rc = (r2 > 0) ? r2 : -1;                            /* 重登失败：如实上报 */
+    }
+    qc_keeper_unlock(ctx->sess);
+
     if (rc < 0)
     {
         free(resp);

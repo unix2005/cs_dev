@@ -57,7 +57,7 @@ public sealed record LoginOptions(
 /// </summary>
 internal sealed unsafe class VmsCoreClient : IDisposable
 {
-    private const uint ExpectedAbiVersion = 5;   // v5：vms_query.ids 改字符串主键 + 新增 org_id（真实字符串主键）
+    private const uint ExpectedAbiVersion = 6;   // v6：M4 会话治理（心跳 / 重连 / 重登 / gate）
 
     private readonly DispatcherQueue? _uiQueue;
     private GCHandle _selfHandle;
@@ -65,6 +65,13 @@ internal sealed unsafe class VmsCoreClient : IDisposable
     private bool _subscribed;
     private bool _disposed;
     private bool _loggedIn;      // M1：是否通过真实后台认证（false = 仍在用 Mock 数据）
+
+    // M4：重登所需的口令缓存。
+    // 注意：这是**内存**缓存，进程退出即消失；生产版应换成 Windows 凭据管理器 / DPAPI
+    // （见《win_vms_v1与后台交互调用方案.md》M4）。内核里**不存**口令也不存派生值，
+    // 每次重登都由本回调现派生 —— 这样"口令"只有一个副本，且始终在 UI 侧手里。
+    private string? _password;
+    private uint    _pbkdf2Iter;
 
     private VmsCoreClient(IntPtr ctx, DispatcherQueue? uiQueue)
     {
@@ -96,6 +103,8 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             Check(NativeStructKind.Vehicle, sizeof(NativeVehicle), nameof(NativeVehicle), mismatches);
             Check(NativeStructKind.Query, sizeof(NativeQuery), nameof(NativeQuery), mismatches);
             Check(NativeStructKind.Credentials, sizeof(NativeCredentials), nameof(NativeCredentials), mismatches);
+            Check(NativeStructKind.SessionInfo, sizeof(NativeSessionInfo), nameof(NativeSessionInfo), mismatches);
+            Check(NativeStructKind.KeeperCfg, sizeof(NativeKeeperCfg), nameof(NativeKeeperCfg), mismatches);
 
             if (mismatches.Count > 0)
                 return NativeProbeResult.Fail("结构体布局与 native 不一致：" + string.Join("; ", mismatches));
@@ -145,6 +154,11 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             var crc = NativeMethods.vms_connect(ctx, endpoint);
             if (crc != 0)
                 throw new InvalidOperationException($"vms_connect 失败：{NativeMethods.DescribeError(ctx, crc)}");
+
+            // M4：会话回调要**早于**登录注册，才能收到"会话建立 / 重连 / 掉线"全过程。
+            // GCHandle 在这里统一分配（Dispose 释放），推送与会话两个回调共用同一句柄。
+            client._selfHandle = GCHandle.Alloc(client, GCHandleType.Normal);
+            client.RegisterSessionCallbacks();
             return client;
         }
         catch
@@ -197,6 +211,16 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         }
 
         _loggedIn = rc == 0;
+        if (rc == 0)
+        {
+            // M4：留存口令**仅供**断线/Token 过期时现派生（一次性口令 OTP 不留存）。
+            // 内核侧不保存口令也不保存派生值，每次重登都经回调向这里索取。
+            _password   = opt.Password;
+            _pbkdf2Iter = (uint)Math.Max(0, opt.Pbkdf2Iterations);
+            return new LoginResult(true, 0, "登录成功");
+        }
+
+        _password = null;
         if (rc == 0) return new LoginResult(true, 0, "登录成功");
 
         var msg = rc > 0
@@ -208,8 +232,10 @@ internal sealed unsafe class VmsCoreClient : IDisposable
     public void Logout()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        NativeMethods.vms_keeper_stop(_ctx);      // M4：先停心跳线程，再登出
         NativeMethods.vms_logout(_ctx);
         _loggedIn = false;
+        _password = null;                          // 口令不再需要，立即弃用
     }
 
     /// <summary>
@@ -224,6 +250,137 @@ internal sealed unsafe class VmsCoreClient : IDisposable
 
     /// <summary>是否已通过真实后台认证（false 表示仍在用内置 Mock 数据）。</summary>
     public bool IsLoggedIn => _loggedIn;
+
+    // ============================ M4：会话治理 ============================
+
+    /// <summary>
+    /// native 会话状态变化（已在 UI 线程）。<see cref="SessionStatus.State"/> 见
+    /// <see cref="NativeSessionState"/>；<see cref="SessionStatus.Code"/>：0 正常、
+    /// &gt;0 服务端结果码、&lt;0 断连。UI 用它驱动状态栏的"在线 / 重连中 / 已断开"。
+    /// </summary>
+    public event EventHandler<SessionStatus>? SessionStateChanged;
+
+    /// <summary>
+    /// 注册会话状态回调与重登凭据回调。**必须在 Login 之前**（Create 里已自动完成）。
+    /// </summary>
+    private void RegisterSessionCallbacks()
+    {
+        if (_ctx == IntPtr.Zero || !_selfHandle.IsAllocated) return;
+        var ud = GCHandle.ToIntPtr(_selfHandle);
+
+        var fpState = (IntPtr)(delegate* unmanaged[Cdecl]<int, int, IntPtr, IntPtr, void>)&OnNativeSessionState;
+        NativeMethods.vms_set_session_callback(_ctx, fpState, ud);
+
+        var fpRelogin = (IntPtr)(delegate* unmanaged[Cdecl]<IntPtr, nuint, uint, IntPtr, IntPtr, int>)&OnNativeRelogin;
+        NativeMethods.vms_set_relogin_callback(_ctx, fpRelogin, ud);
+    }
+
+    /// <summary>
+    /// 启动/预设会话治理。登录**前**调用 = 只记录参数（登录成功后按其启动）；
+    /// 登录**后**调用 = 立即启动。cfg 为 null 时全走 native 默认
+    /// （60s 心跳 / 1s 起 30s 封顶退避 / 无限重连）。
+    /// </summary>
+    public int StartKeeper(NativeKeeperCfg? cfg = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var native = cfg ?? default;
+        return NativeMethods.vms_keeper_start(_ctx, in native);
+    }
+
+    /// <summary>停止会话治理（登出/销毁会自动调用）。</summary>
+    public int StopKeeper()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return NativeMethods.vms_keeper_stop(_ctx);
+    }
+
+    /// <summary>立即唤醒治理线程（立即心跳 / 立即重连；OFFLINE 时再给一轮重试机会）。</summary>
+    public int WakeKeeper()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return NativeMethods.vms_keeper_wake(_ctx);
+    }
+
+    /// <summary>读取会话状态与统计（心跳次数、重连/重登次数、最近事件描述）。</summary>
+    public SessionStatus GetSessionStatus()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var rc = NativeMethods.vms_get_session_info(_ctx, out var s);
+        if (rc != 0) throw new InvalidOperationException(NativeMethods.DescribeError(_ctx, rc));
+
+        byte* d = s.Detail;
+        var detail = Utf8.Read(d, NativeSessionInfo.DetailMax);
+
+        return new SessionStatus(s.State, s.Attempts, s.HbSent, s.HbFailed,
+                                 s.Reconnects, s.Relogins, detail);
+    }
+
+    /// <summary>
+    /// native 心跳线程发来的状态变化：只做数据拷贝，经 DispatcherQueue 编组回 UI 线程。
+    /// 回调里**绝对不能**直接碰 XAML 对象（RPC_E_WRONG_THREAD / 直接崩）。
+    /// </summary>
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnNativeSessionState(int state, int rc, IntPtr msg, IntPtr userData)
+    {
+        if (userData == IntPtr.Zero) return;
+
+        var client = GCHandle.FromIntPtr(userData).Target as VmsCoreClient;
+        if (client is null || client._disposed) return;
+
+        try
+        {
+            var text = msg == IntPtr.Zero ? string.Empty : Marshal.PtrToStringUTF8(msg) ?? string.Empty;
+            client.PostSession(state, rc, text);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[VmsCoreClient] session state failed: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// native 重登凭据回调：拿缓存的口令 + 服务端下发的新 salt 现派生 pwd_hash。
+    /// 返回 0 = 已填好（可继续重登）；非 0 = 无法提供，native 会把会话转 OFFLINE，
+    /// UI 应弹登录框让用户重新输入。
+    /// </summary>
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static int OnNativeRelogin(IntPtr salt, nuint saltLen, uint iter,
+                                       IntPtr pwdHashOut, IntPtr userData)
+    {
+        if (userData == IntPtr.Zero || salt == IntPtr.Zero || pwdHashOut == IntPtr.Zero || saltLen == 0)
+            return -1;
+
+        var client = GCHandle.FromIntPtr(userData).Target as VmsCoreClient;
+        if (client is null || client._disposed) return -1;
+
+        try
+        {
+            var pwd = client._password;
+            if (string.IsNullOrEmpty(pwd)) return -1;   // 没有可用口令：交回 UI 处理
+            return NativeMethods.vms_derive_pwd_hash(pwd, salt, saltLen,
+                                                     iter != 0 ? iter : client._pbkdf2Iter,
+                                                     pwdHashOut) == 0 ? 0 : -1;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[VmsCoreClient] relogin derive failed: {ex}");
+            return -1;
+        }
+    }
+
+    private void PostSession(int state, int rc, string message)
+    {
+        var status = new SessionStatus(state, 0, 0, 0, 0, 0, message);
+        if (_uiQueue is null)
+        {
+            SessionStateChanged?.Invoke(this, status);
+            return;
+        }
+        _uiQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
+        {
+            if (!_disposed) SessionStateChanged?.Invoke(this, status);
+        });
+    }
 
     // ================================ 数据 ================================
 
@@ -346,16 +503,15 @@ internal sealed unsafe class VmsCoreClient : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_subscribed) return;
+        // 句柄由 Create 统一分配（会话回调也要用），这里只在缺失时兜底
+        if (!_selfHandle.IsAllocated)
+            _selfHandle = GCHandle.Alloc(this, GCHandleType.Normal);
 
-        _selfHandle = GCHandle.Alloc(this, GCHandleType.Normal);
         var fp = (IntPtr)(delegate* unmanaged[Cdecl]<IntPtr, nuint, IntPtr, void>)&OnNativePush;
 
         var rc = NativeMethods.vms_subscribe(_ctx, fp, GCHandle.ToIntPtr(_selfHandle));
         if (rc != 0)
-        {
-            _selfHandle.Free();
             throw new InvalidOperationException($"vms_subscribe 失败：{NativeMethods.DescribeError(_ctx, rc)}");
-        }
         _subscribed = true;
     }
 
@@ -364,7 +520,6 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         if (!_subscribed || _ctx == IntPtr.Zero) return;
         NativeMethods.vms_unsubscribe(_ctx);
         _subscribed = false;
-        if (_selfHandle.IsAllocated) _selfHandle.Free();
     }
 
     /// <summary>native 线程入口。只做数据拷贝，禁止触碰 UI。</summary>
@@ -416,9 +571,13 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         Unsubscribe();
         if (_ctx != IntPtr.Zero)
         {
+            NativeMethods.vms_keeper_stop(_ctx);   // M4：先停心跳线程，再销毁上下文
             NativeMethods.vms_destroy(_ctx);
             _ctx = IntPtr.Zero;
         }
+        _password = null;                          // M4：口令副本不再需要
+        if (_selfHandle.IsAllocated) _selfHandle.Free();
         VehiclesPushed = null;
+        SessionStateChanged = null;
     }
 }
