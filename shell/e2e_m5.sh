@@ -174,6 +174,15 @@ KNOCK_ARGS=""
 if [ "$KNOCK" = "1" ]; then
     SPA_KEY="${SPA_KEY:-$CONF_DIR/spa.key}"
     [ -f "$SPA_KEY" ] || die "缺少 SPA 密钥 $SPA_KEY（KNOCK=1 需要，可用 shell/prep_e2e_conf.sh 生成）"
+    # 重编 knockd 会丢 file capability（上面的 build.sh 刚编过它）—— 不补上就是
+    # "SPA 验签成功但 nft 开门失败"：端口依旧不可达，且 knockd 日志里只有一行
+    # ERROR，极易看漏。2026-10-23 真实踩中，靠 nft 集合检查才发现门没开。
+    if ! getcap "$SOFT_HOME/bin/q_service_knockd" 2>/dev/null | grep -q cap_net_admin; then
+        printf '\033[33m[!]\033[0m knockd 缺 cap_net_admin（重编丢失），自动补上...\n'
+        sudo -n setcap cap_net_admin+ep "$SOFT_HOME/bin/q_service_knockd" 2>/dev/null ||
+            die "无法自动补 capability，请手动执行: sudo setcap cap_net_admin+ep $SOFT_HOME/bin/q_service_knockd"
+        printf '  已补上\n'
+    fi
     for conf in knockd_conf.xml knockd_push_conf.xml; do
         [ -f "$CONF_DIR/$conf" ] || die "缺少 $CONF_DIR/$conf（KNOCK=1 需要）"
         if [ "$KNOCK_NFT" = "1" ]; then
@@ -246,7 +255,7 @@ if [ "$KNOCK" = "1" ]; then
     if ! ps -ef | grep "[q]_service_knockd" >/dev/null 2>&1; then
         printf '\033[31m[FAIL]\033[0m knockd 进程已不在 —— SPA 敲门路径未通过验证\n'
     else
-        for klog in knockd.log knockd_push.log; do
+        for klog in knockd_conf.log knockd_push_conf.log; do
             [ -f "$CONF_DIR/$klog" ] || continue
             n=$(grep -cE 'SPA 授权成功|SPA 校验失败' "$CONF_DIR/$klog" 2>/dev/null || true)
             printf '  %s：SPA 记录 %s 条\n' "$klog" "${n:-0}"

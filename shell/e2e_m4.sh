@@ -160,6 +160,14 @@ if [ "$KNOCK" = "1" ]; then
     SPA_KEY="${SPA_KEY:-$CONF_DIR/spa.key}"
     KNOCK_PORT="${KNOCK_PORT:-5001}"
     [ -f "$SPA_KEY" ] || die "缺少 SPA 密钥 $SPA_KEY（KNOCK=1 需要，可用 shell/prep_e2e_conf.sh 生成）"
+    # 重编 knockd 会丢 file capability（上面的 build.sh 刚编过它）—— 不补上就是
+    # "SPA 验签成功但 nft 开门失败"：端口依旧不可时才会暴露，且日志里只有一行 ERROR。
+    if ! getcap "$SOFT_HOME/bin/q_service_knockd" 2>/dev/null | grep -q cap_net_admin; then
+        printf '\033[33m[!]\033[0m knockd 缺 cap_net_admin（重编丢失），自动补上...\n'
+        sudo -n setcap cap_net_admin+ep "$SOFT_HOME/bin/q_service_knockd" 2>/dev/null ||
+            die "无法自动补 capability，请手动执行: sudo setcap cap_net_admin+ep $SOFT_HOME/bin/q_service_knockd"
+        printf '  已补上\n'
+    fi
     if [ "$KNOCK_NFT" = "1" ]; then
         "$SOFT_HOME/bin/q_service_knockd" -c "$CONF_DIR/knockd_conf.xml" \
                 >"$CONF_DIR/knockd.log" 2>&1 &
