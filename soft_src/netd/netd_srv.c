@@ -231,6 +231,11 @@ void on_accept(q_fd_t fd, uint32_t events, void *ctx)
         c->st        = Q_CHAN_ST_NEW;
         c->accept_ts = (time_t)now_sec();
         c->g         = g;
+        /* M5：calloc 把 push.fd 清零成 0 —— 而 0 是合法 fd（stdin）！
+           push_begin 的幂等分支 "fd >= 0 即已建立" 会误判，直接回 OK 却从未
+           连过 pushd；后续 SUB_DELTA 再把帧 send() 到 fd 0（ENOTSOCK 失败）。
+           表现为"BEGIN 成功但一帧推送都收不到"。必须显式置无效值。 */
+        c->push.fd = (q_fd_t)-1;
 
         if (q_tpool_dispatch(g->pool, conn_worker, c) != 0)
         {

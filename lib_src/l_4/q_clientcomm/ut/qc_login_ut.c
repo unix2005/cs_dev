@@ -872,8 +872,13 @@ int main(int argc, char **argv)
             if (rc == 0 && qc_push_connected(p))
             {
                 if (nvid > 0)
-                    step(qc_push_sub_delta(p, Q_PUSH_OP_ADD, vids, (uint32_t)nvid) == 0,
-                         "SUB_DELTA ADD %d 台（本地订阅集合=%u）", nvid, qc_push_sub_count(p));
+                {
+                    /* 先把 sub_delta 的返回值算出来再进 printf：C 不限定参数求值顺序，
+                       混在一起会把"订阅前的计数"打成"订阅后的计数"（曾显示集合=0 造成误判） */
+                    int sub_rc = qc_push_sub_delta(p, Q_PUSH_OP_ADD, vids, (uint32_t)nvid);
+                    step(sub_rc == 0, "SUB_DELTA ADD %d 台（本地订阅集合=%u）",
+                         nvid, qc_push_sub_count(p));
+                }
 
                 printf("  -- 收听推送 %us%s --\n", (unsigned)a.push_sec,
                        a.push_rm ? "（过半 REMOVE 验证停发）" : "");
