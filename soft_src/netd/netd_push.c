@@ -127,13 +127,18 @@ static int push_ipc_recv_frame(q_fd_t fd, uint8_t *buf, size_t cap, size_t *outl
     return 0;
 }
 
-/* 构造 netd_B -> pushd 的 C→S 帧：TLV(CMD) + TLV(CHANID) [+ TLV(BODY)] [+ TLV(SRCIP/USERID/TOKEN/USERNAME)]
-   返回帧长；0 = 编码失败。 */
+/* 构造 netd_B -> pushd 的 C→S 帧**载荷**（TLV 序列）：
+   TLV(CMD) + TLV(CHANID) [+ TLV(BODY)] [+ TLV(SRCIP/USERID/TOKEN/USERNAME)]
+   返回载荷长度；0 = 编码失败。
+   注意：**不在此处写 4B 长度前缀** —— wire 契约是每帧一个前缀，由
+   push_ipc_send_frame 统一加。曾在此处也写过前缀，线上变成 [len][len][TLV]，
+   pushd 把第二段 len 当 TLV 解（tag=0x0000）报"未 BEGIN 收到 cmd=0"，
+   且 netd 侧读应答立刻失败 —— 双前缀故障极难从日志看出来。 */
 static size_t push_build_frame(uint8_t *out, size_t outcap, uint16_t cmd,
                                const netd_conn_t *c,
                                const uint8_t *body, size_t blen)
 {
-    size_t  off = Q_IPC_LENPFX, n = 0u;
+    size_t  off = 0u, n = 0u;
     uint8_t u16[2], ipb[17];
     uint8_t fam = (c->src_addr.fam == AF_INET6) ? 6u : 4u;
 
@@ -181,7 +186,6 @@ static size_t push_build_frame(uint8_t *out, size_t outcap, uint16_t cmd,
         off += n;
     }
 
-    put_be32(out, (uint32_t)(off - Q_IPC_LENPFX));
     return off;
 }
 
