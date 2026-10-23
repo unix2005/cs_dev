@@ -25,8 +25,18 @@
  *   --spakey   SPA 密钥文件（16 字节），随 --knock 使用
  *   --reqport  敲门申请放行的端口（通常等于 --port）
  *   其余参数含义见下方 usage()。
+ *
+ * M5 推送联调（--push，第二条独立长连接，打到 netd_B）：
+ *   [--push-port <n>]      netd_B TCP 端口（默认 18098）
+ *   [--push-knock <ip:p>]  knockd_B UDP 端点；不给则推送连接不敲门（netd_B 直连可达时用）
+ *   [--push-sec <n>]       收听推送秒数（默认 8；要观测报警建议 >=25，桩报警周期 12/17/23s）
+ *   [--push-vids <a,b>]    订阅车辆主键（逗号分隔；默认 京A10001-1,京A10003-2）
+ *   [--push-rm <vid>]      收听过半时 REMOVE 该车，验证停发
+ *   推送连接**自建 LOGIN**（Token 绑定 channel_id，命令连接的 Token 在推送连接上验不过），
+ *   口令由 qc_push_start 瞬态传入；重连经 on_relogin 回调现索取（内核不存口令）。
  */
 #include "qc_client.h"
+#include "qc_push.h"          /* M5：推送长连接门面（第二条独立长连接） */
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -69,6 +79,13 @@ typedef struct
     int         concurrent;   /* 并发业务线程数（验证 gate 串行化）；0=不做 */
     int         case_sel;     /* 只跑第 N 个治理用例（0=全部）。联调环境对单条命令时长敏感时用它拆开跑 */
     const char *conf;         /* v7：XML 配置文件路径；给出时覆盖上面的命令行参数 */
+    /* —— M5：推送长连接联调（第二条独立长连接，打到 netd_B） —— */
+    int         push;         /* 1=跑推送联调 */
+    int         push_port;    /* netd_B TCP 端口（默认 18098） */
+    const char *push_knock;   /* knockd_B UDP 端点 "ip:port"；空=推送连接不敲门（netd_B 直连） */
+    uint32_t    push_sec;     /* 收听推送秒数（默认 8） */
+    const char *push_vids;    /* 订阅车辆主键，逗号分隔（默认 京A10001-1,京A10003-2） */
+    const char *push_rm;      /* 收听过半时 REMOVE 该车（验证停发）；NULL=不测 */
 } args_t;
 
 /* 配置加载结果的存放处：args_t 里都是指向 argv 的指针，而配置内容是**新字符串**，
@@ -99,6 +116,12 @@ static void usage(const char *argv0)
         "  --keeper-sec <秒>   每个观察窗口时长（默认 6）\n"
         "  --max-retry <n>     连续失败 n 次转 OFFLINE；0=无限重连\n"
         "  --concurrent <n>    并发业务线程数（默认 4；0=跳过并发用例）\n"
+        "  --push     跑 M5 推送联调：对 netd_B 建第二条独立长连接（自建登录 + BEGIN + 订阅 + 收听）\n"
+        "  --push-port <n>     netd_B TCP 端口（默认 18098）\n"
+        "  --push-knock <ip:p> knockd_B UDP 端点（SPA 密钥复用 --spakey）；不给则推送连接不敲门\n"
+        "  --push-sec <秒>     收听推送时长（默认 8；观测报警建议 >=25，桩报警周期 12/17/23s）\n"
+        "  --push-vids <a,b>   订阅车辆主键（逗号分隔；默认 京A10001-1,京A10003-2）\n"
+        "  --push-rm <vid>     收听过半时 REMOVE 该车，验证其轨迹停发\n"
         "  --keep    登录成功后保持连接不登出（用于观察服务端日志）\n",
         argv0, (unsigned)Q_PBKDF2_ITER_DEFAULT);
 }
@@ -217,12 +240,16 @@ static int parse_args(int argc, char **argv, args_t *a)
     a->hb_interval = 2u;
     a->keeper_sec  = 6u;
     a->concurrent  = 4;
+    /* M5：推送联调默认值 */
+    a->push_port = 18098;
+    a->push_sec  = 8u;
+    a->push_vids = "京A10001-1,京A10003-2";
 
     for (i = 1; i < argc; i++)
     {
         const char *k = argv[i];
         if (i + 1 >= argc && strcmp(k, "--keep") != 0 && strcmp(k, "--v") != 0
-            && strcmp(k, "--no-biz") != 0)
+            && strcmp(k, "--no-biz") != 0 && strcmp(k, "--push") != 0)
         {
             fprintf(stderr, "参数 %s 缺值\n", k);
             return -1;
@@ -252,8 +279,14 @@ static int parse_args(int argc, char **argv, args_t *a)
         else if (!strcmp(k, "--concurrent"))  a->concurrent  = atoi(argv[++i]);
         else if (!strcmp(k, "--case"))        a->case_sel    = atoi(argv[++i]);
         else if (!strcmp(k, "--conf"))        a->conf        = argv[++i];
-        else if (!strcmp(k, "--keep"))    a->keep    = 1;
-        else if (!strcmp(k, "--v"))       a->verbose = 1;
+        else if (!strcmp(k, "--keep"))    a->keep    = 1;        else if (!strcmp(k, "--v"))       a->verbose = 1;
+        /* —— M5：推送长连接联调 —— */
+        else if (!strcmp(k, "--push"))       a->push       = 1;
+        else if (!strcmp(k, "--push-port"))  a->push_port  = atoi(argv[++i]);
+        else if (!strcmp(k, "--push-knock")) a->push_knock = argv[++i];
+        else if (!strcmp(k, "--push-sec"))   a->push_sec   = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(k, "--push-vids"))  a->push_vids  = argv[++i];
+        else if (!strcmp(k, "--push-rm"))    a->push_rm    = argv[++i];
         else
         {
             fprintf(stderr, "未知参数: %s\n", k);
@@ -405,6 +438,79 @@ static int split_ep(const char *s, char *host, size_t hostcap, int *port)
     host[p - s] = '\0';
     *port = atoi(p + 1);
     return (*port > 0) ? 0 : -1;
+}
+
+/* ==================== M5：推送联调（第二条独立长连接） ====================
+ * 回调跑在 qc_push 的接收线程上：只计数 + 打印，生产实现必须编组回 UI 线程。
+ * 载荷指针回调返回后即失效，故这里全部就地拷贝/打印，不做跨帧持有。 */
+typedef struct
+{
+    unsigned    traj;         /* 轨迹帧数 */
+    unsigned    alarm;        /* 报警帧数 */
+    unsigned    traj_v1;      /* 第一个订阅车的轨迹数 */
+    unsigned    traj_v2;      /* 第二个订阅车的轨迹数 */
+    unsigned    alarm_v1;     /* 第一个订阅车的报警数 */
+    unsigned    traj_rm;      /* 被 REMOVE 的车在 REMOVE 之后的轨迹数（应为 0） */
+    const char *v1;
+    const char *v2;
+    const char *rm;           /* --push-rm 指定，NULL=未启用 */
+} push_stat_t;
+
+static void ut_on_traj(const qc_traj_t *t, void *ud)
+{
+    push_stat_t *st = (push_stat_t *)ud;
+
+    st->traj++;
+    if (st->v1 && strcmp(t->vehicle_id, st->v1) == 0) st->traj_v1++;
+    if (st->v2 && strcmp(t->vehicle_id, st->v2) == 0) st->traj_v2++;
+    if (st->rm && strcmp(t->vehicle_id, st->rm) == 0) st->traj_rm++;
+    printf("        [traj ] %s lon=%.6f lat=%.6f speed=%u online=%u aflags=0x%02x %s %s\n",
+           t->vehicle_id, t->lon, t->lat, (unsigned)t->speed_kph,
+           (unsigned)t->online, (unsigned)t->alarm_flags, t->time, t->address);
+}
+
+static void ut_on_alarm(const qc_alarm_t *a, void *ud)
+{
+    push_stat_t *st = (push_stat_t *)ud;
+
+    st->alarm++;
+    if (st->v1 && strcmp(a->vehicle_id, st->v1) == 0) st->alarm_v1++;
+    printf("        [alarm] %s type=0x%04x org=%s plate=%s lon=%.6f lat=%.6f %s %s\n",
+           a->vehicle_id, (unsigned)a->alarm_type, a->org_id, a->plate,
+           a->lon, a->lat, a->text, a->address);
+}
+
+/* 重连带取口令派生值：与 keeper 同构 —— 内核不存口令，向"UI"现要 */
+static int ut_push_relogin(void *ud, const uint8_t *salt, size_t salt_len,
+                           uint32_t iter, uint8_t out[32])
+{
+    args_t *a = (args_t *)ud;
+
+    if (!a->pass)
+        return -1;
+    return qc_pbkdf2_sm3((const uint8_t *)a->pass, strlen(a->pass), salt, salt_len,
+                         iter ? iter : a->iter, out);
+}
+
+/* 逗号分隔 -> 字符串数组（就地切分，UT 进程生命周期内有效） */
+static int split_vids(const char *s, const char **out, int cap)
+{
+    int  n = 0;
+    char *tmp, *p, *save;
+
+    if (!s || !*s || !out || cap <= 0)
+        return 0;
+    tmp = strdup(s);
+    if (!tmp)
+        return 0;
+    p = strtok_r(tmp, ",", &save);
+    while (p && n < cap)
+    {
+        while (*p == ' ') p++;
+        out[n++] = p;
+        p = strtok_r(NULL, ",", &save);
+    }
+    return n;
 }
 
 /* ------------------------------ 主流程 ------------------------------ */
@@ -660,6 +766,161 @@ int main(int argc, char **argv)
     else
     {
         printf("  [--] --no-biz：跳过业务查询\n");
+    }
+
+    /* 9.7 M5：推送联调（第二条独立长连接 -> netd_B）。
+       与命令连接完全平行：独立 knock -> connect -> SM2 握手 -> HELLO -> LOGIN
+       -> PUSH_BEGIN -> SUB_DELTA -> 收听。口令由 qc_push_start 瞬态传入；
+       断线重连经 ut_push_relogin 现索取（内核不存口令）。
+       推送是增值面：本段失败只记 FAIL 并继续跑后续用例（生产上 native 会降级 mock），
+       不牵连命令连接主链路。 */
+    if (a.push)
+    {
+        qc_push_cfg_t  pc;
+        qc_push_t     *p = NULL;
+        push_stat_t    pst;
+        const char    *vids[16];
+        int            nvid;
+        uint8_t       *ppub = NULL;
+        size_t         ppub_len = 0u;
+        uint32_t       half    = a.push_sec / 2u;
+        uint32_t       sec;
+        unsigned       rm_base = 0u;
+        int            rm_sent = 0;
+
+        /* 服务端公钥：步骤 4 起 pub 缓冲已归 qc_session_create 并释放，
+           这里按 --pub 路径重读一份（两套 netd 实例共用同一套 SM2 身份密钥）。 */
+        ppub = read_file(a.pub, &ppub_len);
+        if (!ppub || ppub_len == 0u || ppub_len > QC_PUSH_PUB_DER_MAX)
+        {
+            step(0, "推送联调：读取服务端公钥失败: %s", a.pub);
+            free(ppub);
+            ppub = NULL;
+        }
+        else
+        {
+            memset(&pc, 0, sizeof(pc));
+            snprintf(pc.host, sizeof(pc.host), "%s", a.host);
+            pc.port = (uint16_t)a.push_port;
+            if (a.push_knock)
+            {
+                const char *keypath = a.spakey ? a.spakey : getenv("GTKVMS_SPA_KEY_FILE");
+                size_t   klen = 0u;
+                uint8_t *kb   = keypath ? read_file(keypath, &klen) : NULL;
+
+                if (!kb || klen == 0u || klen > sizeof(pc.spa_key))
+                {
+                    step(0, "推送敲门：SPA 密钥读取失败或长度非法: %s",
+                         keypath ? keypath : "(未提供 --spakey)");
+                }
+                else
+                {
+                    snprintf(pc.knock, sizeof(pc.knock), "%s", a.push_knock);
+                    memcpy(pc.spa_key, kb, klen);
+                    pc.spa_key_len = klen;
+                    pc.spa_key_id  = 0u;
+                }
+                if (kb)
+                {
+                    memset(kb, 0, klen);
+                    free(kb);
+                }
+            }
+            else
+            {
+                printf("  [--] 推送连接未指定 --push-knock，跳过 SPA 敲门（netd_B 直连）\n");
+            }
+            memcpy(pc.pub_der, ppub, ppub_len);
+            pc.pub_len  = ppub_len;
+            pc.seq0     = 1u;
+            pc.key_id   = 1u;
+            snprintf(pc.user, sizeof(pc.user), "%s", a.user);
+            snprintf(pc.otp, sizeof(pc.otp), "%s", a.otp);
+            if (devid_len > 0u && devid_len <= sizeof(pc.devid))
+            {
+                memcpy(pc.devid, devid, devid_len);
+                pc.devid_len = devid_len;
+            }
+            snprintf(pc.cver, sizeof(pc.cver), "%s", a.cver);
+            pc.pbkdf2_iter     = a.iter;
+            pc.backoff_base_ms = 1000u;
+            pc.backoff_max_ms  = 30000u;
+
+            p = qc_push_create(&pc);
+            step(p != NULL, "qc_push_create（netd_B %s:%u，%s）",
+                 pc.host, (unsigned)pc.port, pc.knock[0] ? pc.knock : "不敲门");
+            memset(&pc, 0, sizeof(pc));   /* 密钥材料即刻清零 */
+        }
+        if (p)
+        {
+            nvid = split_vids(a.push_vids, vids, (int)(sizeof(vids) / sizeof(vids[0])));
+            memset(&pst, 0, sizeof(pst));
+            pst.v1 = nvid > 0 ? vids[0] : NULL;
+            pst.v2 = nvid > 1 ? vids[1] : NULL;
+            pst.rm = a.push_rm;
+            step(nvid > 0, "解析订阅车辆 %d 台: %s", nvid, a.push_vids);
+
+            qc_push_set_callbacks(p, ut_on_traj, ut_on_alarm, ut_push_relogin, &a);
+
+            t0 = clock();
+            rc = qc_push_start(p, a.pass);
+            t1 = clock();
+            step(rc == 0 && qc_push_connected(p),
+                 "qc_push_start（knock->握手->LOGIN->PUSH_BEGIN）rc=%d %.0fms",
+                 rc, (double)(t1 - t0) * 1000.0 / (double)CLOCKS_PER_SEC);
+
+            if (rc == 0 && qc_push_connected(p))
+            {
+                if (nvid > 0)
+                    step(qc_push_sub_delta(p, Q_PUSH_OP_ADD, vids, (uint32_t)nvid) == 0,
+                         "SUB_DELTA ADD %d 台（本地订阅集合=%u）", nvid, qc_push_sub_count(p));
+
+                printf("  -- 收听推送 %us%s --\n", (unsigned)a.push_sec,
+                       a.push_rm ? "（过半 REMOVE 验证停发）" : "");
+                for (sec = 1u; sec <= a.push_sec; sec++)
+                {
+                    ut_sleep_ms(1000u);
+                    if (a.verbose)
+                        printf("        [%2us] traj=%u alarm=%u connected=%d sub=%u\n",
+                               sec, pst.traj, pst.alarm, qc_push_connected(p),
+                               qc_push_sub_count(p));
+                    /* 过半时 REMOVE 一台：等在途帧 drain 后再取基线，
+                       否则 REMOVE 前 pushd 已发出的帧会被误记成"停发失败"。 */
+                    if (!rm_sent && a.push_rm && sec >= half)
+                    {
+                        const char *rmv[1];
+                        rmv[0] = a.push_rm;
+                        step(qc_push_sub_delta(p, Q_PUSH_OP_REMOVE, rmv, 1u) == 0,
+                             "SUB_DELTA REMOVE %s", a.push_rm);
+                        rm_sent = 1;
+                        ut_sleep_ms(2000u);
+                        rm_base = pst.traj_rm;
+                        printf("  [rm] REMOVE 后基线 traj_rm=%u（在途帧已 drain）\n", rm_base);
+                    }
+                }
+
+                /* 断言：轨迹按订阅到达（桩周期 1s/台，8s 窗口足够两台都到帧） */
+                step(pst.traj_v1 >= 1u && (nvid < 2 || pst.traj_v2 >= 1u),
+                     "轨迹按订阅到达 v1(%s)=%u v2(%s)=%u 共 %u 帧",
+                     pst.v1 ? pst.v1 : "-", pst.traj_v1,
+                     pst.v2 ? pst.v2 : "-", pst.traj_v2, pst.traj);
+                if (a.push_rm)
+                    step(rm_sent && pst.traj_rm == rm_base,
+                         "REMOVE 后 %s 轨迹停发（基线=%u，现存=%u）",
+                         a.push_rm, rm_base, pst.traj_rm);
+                if (a.push_sec >= 25u)
+                    step(pst.alarm >= 1u,
+                         "报警按用户组织子树到达（桩周期 12/17/23s，收听 %us 收到 %u 条）",
+                         (unsigned)a.push_sec, pst.alarm);
+                step(qc_push_connected(p) == 1, "收听期间推送连接保持 connected=%d",
+                     qc_push_connected(p));
+            }
+
+            qc_push_stop(p);
+            qc_push_destroy(p);
+            p = NULL;
+        }
+        free(ppub);
     }
 
     /* 9.9 M4：会话治理自检（心跳 / 退避重连 / Token 失效重登 / 并发 gate） */
