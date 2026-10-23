@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  VMS 客户端配置文件（三端共用：WinUI3 / GTK4 / macOS）
+
+  放置位置（按优先级）：
+    1) 环境变量 VMS_CLIENT_CONF 指定的路径   —— 联调 / 多实例并存时用
+    2) Windows : %LOCALAPPDATA%\vms\vms_client.xml
+       Linux   : $XDG_CONFIG_HOME/vms/vms_client.xml（缺省 ~/.config/vms/）
+       macOS   : ~/Library/Application Support/vms/vms_client.xml
+  找不到配置时客户端**不会**崩溃：会以内置模拟数据启动，并在状态栏说明原因。
+
+  全部节点可选，缺失即取默认值（默认值定义在 l_4/q_clientcomm/qc_conf.h，
+  三端同一份 C 代码，不存在"这一端默认 60s、那一端 5s"的分歧）。
+
+  !! 安全提示 !!
+    password 与 otp 允许出现在本文件（保住自动化联调），但加载时会被标记：
+      - 客户端状态栏提示"配置含明文口令"
+      - 明文口令落盘在等保三级 / 密评下是**不合格项**
+    正式部署请留空 password，改由登录框输入 + 系统凭据管理器保管。
+    文件权限建议 chmod 600（仅属主可读写）。
+-->
+<vms_client>
+
+  <!-- ================= 服务端（netd）================= -->
+  <server>
+    <!-- netd 主机：IPv4 点分十进制或域名 -->
+    <host>192.168.19.22</host>
+    <!-- netd 端口（默认 18099） -->
+    <port>18099</port>
+    <!-- 服务端静态 SM2 公钥 DER 路径（**必填**）。
+         它是对服务端做身份认定的唯一依据：缺失则握手变成"跟谁都能握手"。
+         由 shell/prep_e2e_conf.sh 生成，或拷贝服务端 netd_sm2.pub。 -->
+    <pubkey_path>/home/qiao/cs_dev/tmp/vmsconf/netd_sm2.pub</pubkey_path>
+    <!-- 以下两项必须与 netd 配置一致，否则握手失败（默认 1 / 1，一般不用改） -->
+    <seq0>1</seq0>
+    <key_id>1</key_id>
+  </server>
+
+  <!-- ================= 身份与口令派生 ================= -->
+  <auth>
+    <user>qiaoshui</user>
+    <!-- 明文口令：仅联调用，生产留空（留空则客户端要求登录框输入） -->
+    <password>123456</password>
+    <!-- 动态口令：服务端未启用校验时可留空；OTP 是一次性的，**不要**写死在这里 -->
+    <otp></otp>
+    <!-- 设备指纹 hex（32 字节 = 64 个 hex 字符）；留空用内置默认值。
+         真实部署应取硬件指纹并妥善保管，它参与 Token 绑定。 -->
+    <devid_hex></devid_hex>
+    <!-- PBKDF2-SM3 迭代次数：0 = 用协议默认 100000。
+         显式填写时必须 >= 100000，否则客户端拒绝启动（配置校验第 4 项）。 -->
+    <pbkdf2_iter>0</pbkdf2_iter>
+  </auth>
+
+  <!-- ================= SPA 单包敲门（可选）=================
+       仅当服务端部署了 knockd + nftables 端口隐身时才需要。
+       endpoint 与 spa_key_path 必须成对给出，只写一个会在启动校验时被拦下。 -->
+  <knock>
+    <endpoint>192.168.19.22:5001</endpoint>
+    <spa_key_path>/home/qiao/cs_dev/tmp/vmsconf/spa.key</spa_key_path>
+    <!-- 申请放行的端口；0 = 取 server.port -->
+    <req_port>18099</req_port>
+    <!-- 放行时长（秒），0 = 由 knockd 取默认 -->
+    <req_ttl>300</req_ttl>
+    <!-- SPA 密钥版本，须与 knockd 一致 -->
+    <key_id>1</key_id>
+  </knock>
+
+  <!-- ================= 会话治理（M4）=================
+       这三个参数决定断线后的行为，别随手改小：
+         心跳越密 —— 服务端压力越大，且 Token 不因心跳续期，加密没用；
+         退避越短 —— 车队同时断线时的重连风暴越猛（内核已带 ±20% 抖动）。 -->
+  <keeper>
+    <heartbeat_ms>60000</heartbeat_ms>
+    <backoff_base_ms>1000</backoff_base_ms>
+    <backoff_max_ms>30000</backoff_max_ms>
+    <!-- 最大重连次数：0 = 无限重试（不退到离线） -->
+    <max_retry>0</max_retry>
+    <!-- 登录成功后自动起治理线程；0 = 关闭（多连接场景由 UI 自行决定何时起） -->
+    <auto_start>1</auto_start>
+  </keeper>
+
+  <!-- ================= 客户端自身 ================= -->
+  <app>
+    <client_version>1.2.0</client_version>
+    <log_level>info</log_level>
+    <connect_timeout_ms>5000</connect_timeout_ms>
+  </app>
+
+</vms_client>

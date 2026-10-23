@@ -1,0 +1,10 @@
+<Solution>
+  <Configurations>
+    <Platform Name="arm64ec" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="Vms.Client.csproj">
+    <Platform Solution="*|arm64ec" Project="arm64ec" />
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
+</Solution>

@@ -18,6 +18,7 @@ $env:TEMP                    = "$Root/.nuget/scratch"
 $env:TMP                     = "$Root/.nuget/scratch"
 $env:DOTNET_CLI_HOME         = "$Root/.nuget/cli-home"
 $env:MSBUILDDISABLENODEREUSE = "1"
+$env:VMS_CLIENT_CONF         = "E:\win_e\cs_dev\soft_src\win_vms_v1\vms_client.xml"
 
 foreach ($d in @($env:NUGET_PACKAGES, $env:NUGET_HTTP_CACHE_PATH, $env:TEMP, $env:DOTNET_CLI_HOME)) {
     if (-not (Test-Path -LiteralPath $d)) {
@@ -27,3 +28,4 @@ foreach ($d in @($env:NUGET_PACKAGES, $env:NUGET_HTTP_CACHE_PATH, $env:TEMP, $en
 
 Write-Host "[env] NUGET_PACKAGES -> $env:NUGET_PACKAGES"
 Write-Host "[env] TEMP           -> $env:TEMP"
+Write-Host "[env] VMS_CLIENT_CONF -> $env:VMS_CLIENT_CONF"

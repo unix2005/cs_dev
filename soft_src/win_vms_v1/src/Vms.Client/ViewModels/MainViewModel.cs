@@ -24,6 +24,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public MainViewModel(DispatcherQueue? uiQueue)
     {
         _bundle = VehicleDataSourceFactory.Create(uiQueue);
+        try
+        {
+            var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client");
+            System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "trace.log"), $"[{DateTime.Now:HH:mm:ss.fff}] probe: success={_bundle.Probe.Success} msg={_bundle.Probe.Message}\n");
+        }
+        catch { }
         BackendBadge = _bundle.Source.BackendName;
         UsingNativeBackend = _bundle.Source.IsNative;
         StatusMessage = _bundle.Probe.Success
@@ -177,7 +184,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// </summary>
     private async Task TryAutoLoginAsync(CancellationToken ct)
     {
+        void Trace(string msg)
+        {
+            try
+            {
+                var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "trace.log"), $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n");
+            }
+            catch { }
+        }
+
+        Trace("auto-login: begin");
         var (opt, err) = VehicleDataSourceFactory.TryCreateLoginOptionsFromConfig();
+        Trace($"auto-login: config opt={(opt == null ? "null" : "ok")} err={err}");
         if (opt is null)
         {
             StatusMessage = err is null
@@ -186,25 +206,30 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
         if (_bundle.Source is not NativeVehicleDataSource native)
+        {
+            Trace("auto-login: source not Native, skip");
             return;
+        }
 
         try
         {
+            Trace("auto-login: before LoginAsync");
             var r = await native.LoginAsync(opt, ct);
+            Trace($"auto-login: after LoginAsync success={r.Success} msg={r.Message}");
             if (r.Success)
             {
                 BackendBadge = $"{_bundle.Source.BackendName} · 已登录";
                 StatusMessage = $"已连接后台 {opt.Host}:{opt.Port}，状态栏为真实数据";
 
-                // M5：登录成功后启动真实推送长连接（第二条独立 TCP）。
-                // 轨迹回调已由 InitializeAsync 里的 StartRealtime（vms_subscribe）注册，这里只开连接；
-                // 连不上真实推送服务时 native 转本地 mock 退化、不阻断界面，失败仅记录。
+                Trace("auto-login: before StartPushAsync");
                 try
                 {
                     await native.StartPushAsync(opt.Password, opt.Otp);
+                    Trace("auto-login: after StartPushAsync");
                 }
                 catch (Exception ex)
                 {
+                    Trace($"auto-login: StartPushAsync ex: {ex.Message}");
                     StatusMessage = $"已登录，但实时推送连接启动失败（退化为静态刷新）：{ex.Message}";
                 }
             }
@@ -215,7 +240,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            // 登录失败绝不能让界面起不来：维持 Mock 数据源，只把原因说清楚
+            Trace($"auto-login: LoginAsync ex: {ex}");
             StatusMessage = $"登录异常：{ex.Message}（仍显示内置模拟数据）";
         }
     }

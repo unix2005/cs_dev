@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Vms.Client": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "VMS_CLIENT_CONF": "E:\\win_e\\cs_dev\\soft_src\\win_vms_v1\\vms_client.xml"
+      }
+    }
+  }
+}

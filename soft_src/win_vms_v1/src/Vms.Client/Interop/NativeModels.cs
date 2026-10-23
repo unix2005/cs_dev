@@ -192,6 +192,9 @@ internal unsafe struct NativeSessionInfo
     public ulong NextHbMs;
     public ulong NextRetryMs;
     public fixed byte Detail[DetailMax];
+    /* v8（M5）尾追：推送长连接状态（与 native vms_session_info 尾部对齐） */
+    public uint PushConnected;
+    public uint PushSubs;
 }
 
 /// <summary>M4：会话治理参数（对应 <c>vms_keeper_cfg</c>）。全 0 = 交给 native 取默认。</summary>
@@ -247,6 +250,13 @@ internal unsafe struct NativeClientConf
     public fixed byte ClientVersion[CverMax];
     public fixed byte LogLevel[LevelMax];
     public fixed byte SourcePath[PathMax];
+    /* v8（M5）推送段：与 native vms_client_conf 尾部对齐，缺这几个字段会导致
+       vms_load_config 写 out_conf 时栈越界（0xC0000409）。 */
+    public fixed byte PushHost[HostMax];
+    public fixed byte PushKnock[HostMax];
+    public ushort PushPort;
+    public ushort PushReserved;
+    public uint PushReserved2;
 }
 
 /// <summary><c>VMS_CONF_F_*</c>：配置加载结果的标志位。</summary>
