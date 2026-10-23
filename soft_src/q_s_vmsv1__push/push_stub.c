@@ -100,7 +100,7 @@ typedef struct sim_veh {
     uint64_t phase_ms;                  /* 错峰相位 */
 } sim_veh_t;
 
-static sim_veh g_veh[PUSH_VEH_MAX];
+static sim_veh_t g_veh[PUSH_VEH_MAX];
 static uint32_t g_veh_n = PUSH_VEH_MAX;
 
 /* 位置边界（超出则反射 heading，把车拢在可见区域内） */
@@ -213,18 +213,6 @@ const char *push_veh_plate(uint32_t i)
 {
     sim_veh_t *v = veh_at(i);
     return v ? v->plate : "";
-}
-
-static sim_veh_t *veh_find(const char *vid)
-{
-    uint32_t i;
-
-    if (!vid || !vid[0])
-        return NULL;
-    for (i = 0u; i < push_veh_count(); ++i)
-        if (strcmp(g_veh[i].vehicle_id, vid) == 0)
-            return &g_veh[i];
-    return NULL;
 }
 
 /* ===================== TLV 组帧（与 qc_push_parse_traj/parse_alarm 严格对齐） ===================== */
@@ -391,8 +379,9 @@ void push_sim_deliver_locked(uint64_t now_ms)
     uint32_t       nfired, i, k;
     uint32_t       n = push_veh_count();
     push_session_t *s;
-    uint8_t        body[PUSH_MAXMSG];
-    size_t         blen;
+    uint8_t        inner[PUSH_MAXMSG];        /* 推送域 TLV 序列（push_build_* 产物） */
+    uint8_t        wire[PUSH_MAXMSG + 16u];   /* 外层帧：TLV(CMD)+TLV(BODY) */
+    size_t         ilen, wlen;
 
     nfired = sim_tick_locked(now_ms, fired, PUSH_FIRED_MAX);
 
@@ -412,11 +401,14 @@ void push_sim_deliver_locked(uint64_t now_ms)
             if (!subd || now_ms < v->next_emit_ms)
                 continue;
 
-            blen = push_build_traj(body, sizeof(body), v->vehicle_id, v->lon, v->lat,
+            ilen = push_build_traj(inner, sizeof(inner), v->vehicle_id, v->lon, v->lat,
                                    v->speed_kph, (uint32_t)v->online, v->active_alarm);
-            if (blen == 0u)
+            if (ilen == 0u)
                 continue;
-            if (push_send_frame(s->fd, body, blen) != 0)
+            wlen = push_wrap_cmd_body(Q_CHAN_CMD_PUSH_TRAJ, inner, ilen, wire, sizeof(wire));
+            if (wlen == 0u)
+                continue;
+            if (push_send_frame(s->fd, wire, wlen) != 0)
             {
                 s->dead = 1;               /* 发送失败：worker 随后拆链 */
                 break;
@@ -436,12 +428,15 @@ void push_sim_deliver_locked(uint64_t now_ms)
 
             if (!push_org_in_subtree(s->org_id, v->org_id))
                 continue;
-            blen = push_build_alarm(body, sizeof(body), v->vehicle_id, v->org_id,
+            ilen = push_build_alarm(inner, sizeof(inner), v->vehicle_id, v->org_id,
                                     v->plate, a->type, v->lon, v->lat, a->text,
                                     addr_of(v->lon, v->lat));
-            if (blen == 0u)
+            if (ilen == 0u)
                 continue;
-            if (push_send_frame(s->fd, body, blen) != 0)
+            wlen = push_wrap_cmd_body(Q_CHAN_CMD_PUSH_ALARM, inner, ilen, wire, sizeof(wire));
+            if (wlen == 0u)
+                continue;
+            if (push_send_frame(s->fd, wire, wlen) != 0)
             {
                 s->dead = 1;
                 break;
@@ -557,6 +552,33 @@ int push_selftest(void)
     fails += check(v && vl > 0u, "alarm PLATE 非空");
     v = tlv_find(buf, blen, Q_IPC_T_PUSH_ATEXT, &vl);
     fails += check(v && vl > 0u, "alarm ATEXT 非空");
+
+    /* ---- 4b. 外层包装（pushd -> netd_B 帧契约：TLV(CMD)+TLV(BODY)）----
+       曾经的 bug：交付循环直接发 inner（推送域 TLV），探针按契约解析时
+       表现为"一帧都收不到"且极难定位 —— 这里把外层钉死。 */
+    {
+        uint8_t wire[1024];
+        size_t  wlen;
+
+        blen = push_build_traj(buf, sizeof(buf), "京A10001-1", 113.5729, 42.4431, 62u, 1u, 0u);
+        fails += check(blen > 0u, "wrap: inner 非空");
+        wlen = push_wrap_cmd_body(Q_CHAN_CMD_PUSH_TRAJ, buf, blen, wire, sizeof(wire));
+        fails += check(wlen > blen, "wrap: 外层比 inner 长");
+        v = tlv_find(wire, wlen, Q_IPC_T_CMD, &vl);
+        fails += check(v && vl == 2u && v[0] == 0x00 && v[1] == 0x52u, "wrap: CMD=0x0052 在首");
+        v = tlv_find(wire, wlen, Q_IPC_T_BODY, &vl);
+        fails += check(v && vl == (uint16_t)blen && memcmp(v, buf, blen) == 0,
+                       "wrap: BODY 原样包含 inner");
+
+        blen = push_build_alarm(buf, sizeof(buf), "京A10003-2", "31", "京A10003",
+                                Q_PUSH_ALARM_FATIGUE, 113.5601, 42.4390, "疲劳驾驶", "东胜区");
+        wlen = push_wrap_cmd_body(Q_CHAN_CMD_PUSH_ALARM, buf, blen, wire, sizeof(wire));
+        v = tlv_find(wire, wlen, Q_IPC_T_CMD, &vl);
+        fails += check(v && vl == 2u && v[0] == 0x00 && v[1] == 0x53u, "wrap: ALARM CMD=0x0053");
+        v = tlv_find(wire, wlen, Q_IPC_T_BODY, &vl);
+        fails += check(v && vl == (uint16_t)blen && memcmp(v, buf, blen) == 0,
+                       "wrap: ALARM BODY 原样包含 inner");
+    }
 
     /* ---- 5. 订阅集合语义（ADD 去重 / REMOVE 幂等 / 交换尾部删除） ---- */
     memset(&s, 0, sizeof(s));

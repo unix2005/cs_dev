@@ -129,11 +129,11 @@ typedef struct push_session
     struct push_session *next;
 } push_session_t;
 
-/* 每连接上下文：accept 后分配，worker 线程独占（无需加锁） */
+/* 每连接上下文：accept 后分配，worker 线程独占（无需加锁）。
+   注：不持 struct push_ctx* —— worker 只需要 fd（会话表/配置/锁都是全局单例）。 */
 typedef struct
 {
     q_fd_t         fd;
-    struct push_ctx *g;
 } push_conn_t;
 
 /* ===================== 全局对象 ===================== */
@@ -154,6 +154,9 @@ int      push_send_frame(q_fd_t fd, const uint8_t *buf, size_t len);
 int      push_recv_frame(q_fd_t fd, uint8_t *buf, size_t cap, size_t *outlen);
 /* 当前时刻 "YYYY-MM-DD HH:MM:SS"（本地时区；桩数据用，不与真实 GPS 时间源对接） */
 void     push_now_str(char *dst, size_t cap);
+/* 推送域 TLV 序列 -> netd_B 外层帧：TLV(CMD) + TLV(BODY)。pushd 发出的每一帧都必须经此包装 */
+size_t   push_wrap_cmd_body(uint16_t cmd, const uint8_t *inner, size_t inner_len,
+                            uint8_t *out, size_t outcap);
 
 /* ===================== 会话管理（push_srv.c，g_lock 内调用） ===================== */
 /* 注册会话（BEGIN 处理内调用，持锁）；成功 0 */
@@ -193,6 +196,9 @@ size_t push_build_traj(uint8_t *out, size_t cap, const char *vid,
 size_t push_build_alarm(uint8_t *out, size_t cap, const char *vid, const char *org,
                         const char *plate, uint32_t alarm_type,
                         double lon, double lat, const char *text, const char *addr);
+
+/* 推进 + 交付一 tick 的全部数据（push_sim.c 持 g_lock 调用；定义于 push_stub.c） */
+void push_sim_deliver_locked(uint64_t now_ms);
 
 /* 模拟线程主体（main.c 启动）：推进车辆 -> 按订阅/组织子树下发 TRAJ/ALARM */
 void *push_sim_thread(void *arg);

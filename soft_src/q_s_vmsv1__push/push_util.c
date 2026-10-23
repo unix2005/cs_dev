@@ -66,6 +66,32 @@ int push_send_frame(q_fd_t fd, const uint8_t *buf, size_t len)
     return 0;
 }
 
+/* 把推送域 TLV 序列包装成 netd_B 约定的外层帧：
+   TLV(CMD=0x0052|0x0053, uint16 网络序) + TLV(BODY=inner)。
+   pushd -> netd_B 的每一帧都必须走这里 —— 曾漏掉外层直接发 inner，
+   探针按契约解析时表现为"一帧都收不到"（tag 对不上），且极难定位。
+   返回外层总长度；0 = 失败（空间不足 / inner 超 64KB）。 */
+size_t push_wrap_cmd_body(uint16_t cmd, const uint8_t *inner, size_t inner_len,
+                          uint8_t *out, size_t outcap)
+{
+    uint8_t cb[2];
+    size_t  off = 0u, n = 0u;
+
+    if (!out || outcap < 12u || inner_len > 0xFFFFu)
+        return 0u;
+    cb[0] = (uint8_t)(cmd >> 8);
+    cb[1] = (uint8_t)(cmd & 0xffu);
+    if (q_codec_tlv_encode(out, outcap, Q_IPC_T_CMD, cb, 2u, &n) != 0)
+        return 0u;
+    off = n;
+    if (inner_len > 0u &&
+        q_codec_tlv_encode(out + off, outcap - off, Q_IPC_T_BODY, inner,
+                           (uint16_t)inner_len, &n) != 0)
+        return 0u;
+    off += n;
+    return off;
+}
+
 /* 整帧读取：长度前缀 + 载荷。超时/EOF/错误一律 -1（调用方据此拆链）。 */
 /* 精确读满 len 字节：q_ipc_recv 是单次 recv（可能短读），
    长度前缀与载荷都必须循环读满，否则一次部分到达就会把帧界读错。 */

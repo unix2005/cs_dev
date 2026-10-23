@@ -114,7 +114,6 @@ void push_sub_remove(push_session_t *s, const char *vid)
 void push_conn_worker(void *arg)
 {
     push_conn_t     *c = (push_conn_t *)arg;
-    struct push_ctx *g = c->g;
     push_session_t  *s;
     uint8_t         *buf;
 
@@ -182,7 +181,6 @@ void push_on_accept(q_fd_t fd, uint32_t events, void *ctx)
             continue;
         }
         c->fd = (q_fd_t)cfd;
-        c->g  = g;
 
         if (q_tpool_dispatch(g->pool, push_conn_worker, c) != 0)
         {
