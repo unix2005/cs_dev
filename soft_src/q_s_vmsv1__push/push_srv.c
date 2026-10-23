@@ -124,7 +124,9 @@ void push_conn_worker(void *arg)
 
     s->fd = c->fd;
 
-    /* 收发超时：阻塞 recv 无超时会因异常对端长期占用 worker；
+    /* 收发超时：RCVTIMEO 让"对端静默"可被循环感知（否则异常对端会永久占用 worker），
+       但**超时不拆链** —— SUB_DELTA 免回执，netd_B 订完默背后 UDS 可长时间无帧，
+       10s 没数据是正常形态（M5 联调时误判为断连，客户端每 10s 重连一次）。
        SNDTIMEO 同时兜住模拟线程的推送发送（UI 不读时 5s 判死，防整链停滞）。 */
     (void)push_set_io_timeout(c->fd, g_pcfg.io_timeout_sec);
 
@@ -133,8 +135,11 @@ void push_conn_worker(void *arg)
         size_t len = 0u;
         int    rc;
 
-        if (push_recv_frame(c->fd, buf, PUSH_MAXMSG, &len) != 0)
-            break;                          /* 对端关闭 / 超时 / 错误 */
+        rc = push_recv_frame(c->fd, buf, PUSH_MAXMSG, &len);
+        if (rc == 1)
+            continue;                  /* 超时：订阅为空时 UDS 长静默是常态，续等 */
+        if (rc != 0)
+            break;                     /* EOF / 错误：对端已走，拆链 */
 
         pthread_mutex_lock(&g_lock);
         rc = push_handle_frame(s, buf, len);

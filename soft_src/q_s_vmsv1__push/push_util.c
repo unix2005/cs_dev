@@ -7,6 +7,7 @@
  */
 #include "srv_push.h"
 
+#include <errno.h>
 #include <time.h>
 
 void push_put_be32(uint8_t *p, uint32_t v)
@@ -94,7 +95,12 @@ size_t push_wrap_cmd_body(uint16_t cmd, const uint8_t *inner, size_t inner_len,
 
 /* 整帧读取：长度前缀 + 载荷。超时/EOF/错误一律 -1（调用方据此拆链）。 */
 /* 精确读满 len 字节：q_ipc_recv 是单次 recv（可能短读），
-   长度前缀与载荷都必须循环读满，否则一次部分到达就会把帧界读错。 */
+   长度前缀与载荷都必须循环读满，否则一次部分到达就会把帧界读错。
+   返回值**三态**：0=读满；1=超时（EAGAIN/EWOULDBLOCK，调用方应继续等）；
+   -1=EOF/错误（对端关闭或真故障，应拆链）。
+   为什么必须显式区分：recv 返回 0（对端关闭）时**不写 errno**，若调用方
+   只看 errno 判断，会把上次超时残留的 EAGAIN 当成又一次超时，在已经关闭的
+   socket 上无限循环（M5 联调时 UDS 两侧都踩过这个形态）。 */
 static int ipc_read_exact(q_fd_t fd, uint8_t *buf, size_t len)
 {
     size_t got = 0u;
@@ -102,8 +108,10 @@ static int ipc_read_exact(q_fd_t fd, uint8_t *buf, size_t len)
     while (got < len)
     {
         ssize_t n = q_ipc_recv(fd, buf + got, len - got);
-        if (n <= 0)
-            return -1;               /* 0=对端关闭，<0 出错/超时 */
+        if (n == 0)
+            return -1;               /* 0=对端关闭 */
+        if (n < 0)
+            return (errno == EAGAIN || errno == EWOULDBLOCK) ? 1 : -1;
         got += (size_t)n;
     }
     return 0;
@@ -113,14 +121,17 @@ int push_recv_frame(q_fd_t fd, uint8_t *buf, size_t cap, size_t *outlen)
 {
     uint8_t  pfx[PUSH_LENPFX];
     uint32_t need;
+    int      rc;
 
-    if (ipc_read_exact(fd, pfx, PUSH_LENPFX) != 0)
-        return -1;                      /* EOF / 超时 / 错误 */
+    rc = ipc_read_exact(fd, pfx, PUSH_LENPFX);
+    if (rc != 0)
+        return rc;                     /* 1=超时（续等）/ -1=EOF/错误 */
     need = push_get_be32(pfx);
     if (need == 0u || need > cap)
         return -1;                      /* 长度非法：直接断，防缓冲溢出 */
-    if (ipc_read_exact(fd, buf, need) != 0)
-        return -1;
+    rc = ipc_read_exact(fd, buf, need);
+    if (rc != 0)
+        return rc;
     if (outlen)
         *outlen = need;
     return 0;

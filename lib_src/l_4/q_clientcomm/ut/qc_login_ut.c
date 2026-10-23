@@ -860,7 +860,10 @@ int main(int argc, char **argv)
             pst.rm = a.push_rm;
             step(nvid > 0, "解析订阅车辆 %d 台: %s", nvid, a.push_vids);
 
-            qc_push_set_callbacks(p, ut_on_traj, ut_on_alarm, ut_push_relogin, &a);
+            /* 回调 ud 必须是 &pst（计数器落地处）—— 曾误传 &a，计数写进
+               args_t，main 读到的永远是 0，而 printf 用 t->vehicle_id 看似正常，
+               属于"看着在跑、断言全假"的隐蔽故障。 */
+            qc_push_set_callbacks(p, ut_on_traj, ut_on_alarm, ut_push_relogin, &pst);
 
             t0 = clock();
             rc = qc_push_start(p, a.pass);
@@ -885,6 +888,11 @@ int main(int argc, char **argv)
                 for (sec = 1u; sec <= a.push_sec; sec++)
                 {
                     ut_sleep_ms(1000u);
+                    /* 命令连接保活：netd_A 对命令连接有 recv 超时（10s），
+                       收听推送期间命令连接无流量会被关掉（M4 的 keeper 心跳
+                       掩盖了这一点，M5 无 keeper 时暴露为 qc_logout 失败）。 */
+                    if (sec % 5u == 0u)
+                        (void)qc_heartbeat(s);
                     if (a.verbose)
                         printf("        [%2us] traj=%u alarm=%u connected=%d sub=%u\n",
                                sec, pst.traj, pst.alarm, qc_push_connected(p),

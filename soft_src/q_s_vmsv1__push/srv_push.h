@@ -151,6 +151,9 @@ uint32_t push_get_be32(const uint8_t *p);
 int      push_hex_encode(const uint8_t *b, size_t len, char *out, size_t outcap);
 int      push_set_io_timeout(q_fd_t fd, int sec);
 int      push_send_frame(q_fd_t fd, const uint8_t *buf, size_t len);
+/* 收一帧 [4B BE len][TLV...]。**三态返回**：0=成功；1=超时（EAGAIN，订阅为空的
+   长静默是正常形态，调用方须继续等）；-1=EOF/错误（拆链）。
+   不可把超时当断连：SUB_DELTA 免回执，netd_B 订完默背后 UDS 可长时间无帧。 */
 int      push_recv_frame(q_fd_t fd, uint8_t *buf, size_t cap, size_t *outlen);
 /* 当前时刻 "YYYY-MM-DD HH:MM:SS"（本地时区；桩数据用，不与真实 GPS 时间源对接） */
 void     push_now_str(char *dst, size_t cap);

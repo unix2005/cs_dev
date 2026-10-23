@@ -204,7 +204,8 @@ else
 fi
 
 # ---------------------------------------------------------------- 3. 跑推送联调
-log "推送联调（收听 %ss，订阅 %s，REMOVE %s）" "$PUSH_SEC" "$PUSH_VIDS" "${PUSH_RM:-（跳过）}"
+# 注意 log() 只做 %s 替换（不吃额外参数），格式串先自己拼好
+log "推送联调（收听 ${PUSH_SEC}s，订阅 ${PUSH_VIDS}，REMOVE ${PUSH_RM:-（跳过）}）"
 # stdbuf：UT 输出重定向到文件/管道时是全缓冲的，挂死一行都看不到 —— 强制行缓冲。
 # timeout：任何一环节挂死都不至于把整个脚本拖住（UT_TIMEOUT=0 表示不限时）。
 UT_TIMEOUT="${UT_TIMEOUT:-180}"

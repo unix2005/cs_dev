@@ -41,6 +41,11 @@
 #define PUSH_KA_INTVL 10
 #define PUSH_KA_CNT   3
 
+/* 精确读满 len 字节：q_ipc_recv 是单次 recv（可能短读），
+   长度前缀与载荷都必须循环读满，否则一次部分到达就会把帧界读错。
+   返回值**三态**：0=读满；1=超时（EAGAIN，调用方续等）；-1=EOF/错误（拆链）。
+   为什么必须显式区分：recv 返回 0（对端关闭）时**不写 errno**，只看 errno
+   会把上次超时残留的 EAGAIN 当成又一次超时，在已经关闭的 socket 上无限循环。 */
 static int ipc_read_exact(q_fd_t fd, uint8_t *buf, size_t len)
 {
     size_t got = 0u;
@@ -48,8 +53,10 @@ static int ipc_read_exact(q_fd_t fd, uint8_t *buf, size_t len)
     while (got < len)
     {
         ssize_t n = q_ipc_recv((int)fd, buf + got, len - got);
-        if (n <= 0)
-            return -1;               /* 0=对端关闭，<0 出错/超时 */
+        if (n == 0)
+            return -1;               /* 0=对端关闭 */
+        if (n < 0)
+            return (errno == EAGAIN || errno == EWOULDBLOCK) ? 1 : -1;
         got += (size_t)n;
     }
     return 0;
@@ -108,20 +115,24 @@ static int push_ipc_send_frame(q_fd_t fd, const uint8_t *buf, size_t len)
     return 0;
 }
 
-/* 收一帧 [4B BE len][TLV...]；超时/EOF/错误一律 -1（调用方据 stop 标志区分） */
+/* 收一帧 [4B BE len][TLV...]。**三态返回**：0=成功；1=超时（续等）；
+   -1=EOF/错误。订阅为空的推送连接上 pushd 长时间不发帧是正常形态。 */
 static int push_ipc_recv_frame(q_fd_t fd, uint8_t *buf, size_t cap, size_t *outlen)
 {
     uint8_t  pfx[Q_IPC_LENPFX];
     uint32_t need;
+    int      rc;
 
-    if (ipc_read_exact(fd, pfx, Q_IPC_LENPFX) != 0)
-        return -1;
+    rc = ipc_read_exact(fd, pfx, Q_IPC_LENPFX);
+    if (rc != 0)
+        return rc;
     need = ((uint32_t)pfx[0] << 24) | ((uint32_t)pfx[1] << 16) |
            ((uint32_t)pfx[2] << 8) | (uint32_t)pfx[3];
     if (need == 0u || need > cap)
         return -1;
-    if (ipc_read_exact(fd, buf, need) != 0)
-        return -1;
+    rc = ipc_read_exact(fd, buf, need);
+    if (rc != 0)
+        return rc;
     if (outlen)
         *outlen = need;
     return 0;
@@ -228,16 +239,13 @@ static void *push_reader_thread(void *arg)
         uint16_t tag = 0u, vlen = 0u, blen = 0u;
         const uint8_t *val = NULL;
         size_t   used = 0u;
+        int      rc;
 
-        if (push_ipc_recv_frame(c->push.fd, buf, PUSH_FRAME_MAX, &flen) != 0)
-        {
-            /* 超时（EAGAIN）是常态而非故障：订阅为空（还没订 / 已全部 REMOVE）时
-               pushd 本来就不发帧，与客户端 qc_push_thread "无数据是常态" 同策略。
-               只有真 EOF/错误才拆链 —— 否则一个订了空集的客户端 10s 后被误杀。 */
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                continue;
-            break;                  /* EOF / 错误：UDS 链路已断 */
-        }
+        rc = push_ipc_recv_frame(c->push.fd, buf, PUSH_FRAME_MAX, &flen);
+        if (rc == 1)
+            continue;                  /* 超时是常态：订阅为空时 pushd 本来就不发帧 */
+        if (rc != 0)
+            break;                     /* EOF / 错误：UDS 链路已断 */
 
         while (off < flen)
         {
