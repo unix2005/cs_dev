@@ -62,6 +62,7 @@ void conn_worker(void *arg)
                    netd_conn_ntop(c, ep, sizeof(ep)));
         goto cleanup;
     }
+    c->chan = ch;      /* M5：读线程借它把 pushd 的推送帧加密回写（见 netd_push.c） */
     QLOG_INFO(g->log, "通道就绪 src=%s", netd_conn_ntop(c, ep, sizeof(ep)));
 
     /* ---- 2. 收包循环：阻塞式整帧收发 + 状态 / 配额校验 ---- */
@@ -72,7 +73,14 @@ void conn_worker(void *arg)
         int      login_ok = 0;
 
         if (q_chan_receive(ch, c->fd, plain, NETD_PLAIN_MAX, &plainlen, &cmd) != 0)
-            break;                                  /* EOF / 校验失败 / 超时 */
+        {
+            /* M5：推送连接（BEGIN 后）无心跳，收包超时是常态而非故障 ——
+               与客户端 qc_push_thread 同策略：EAGAIN 继续等，仅真故障才拆链。
+               若一律断连，一条健康的推送连接会每 IO 超时被误杀一次。 */
+            if (c->push.fd >= 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                continue;
+            break;                              /* EOF / 校验失败 / 超时（非推送连接） */
+        }
 
         /* 每帧一个请求号：随 IPC 透传到 bizd/微服务，保证整条链 src_ip#id 一致 */
         netd_next_req_id(c->req_id, sizeof(c->req_id));
@@ -129,7 +137,10 @@ void conn_worker(void *arg)
             }
         }
 
-        if (outlen > 0u && q_chan_transmit(ch, c->fd, resp, outlen, cmd) != 0)
+        /* 回写一律走 netd_push_transmit：持 push.tx_lock 串行化。
+           推送连接上读线程也在同一通道回写 TRAJ/ALARM，而 q_chan_transmit
+           无内部锁且会改 seq_send —— 不串行化会出现 seq 错乱/密文错帧。 */
+        if (outlen > 0u && netd_push_transmit(c, resp, outlen, cmd) != 0)
             break;
 
         QLOG_INFO(g->log, "[send] %s cmd=%u --> 客户端 outlen=%zu",
@@ -137,6 +148,9 @@ void conn_worker(void *arg)
     }
 
 cleanup:
+    /* M5：先拆推送反向通路（停读线程 -> join -> 关 UDS）。
+       必须在关客户端 fd 之前：join 保证读线程不再触碰 c->fd。 */
+    push_teardown(c);
     if (ch)
         q_chan_destroy(ch);          /* 内部清零私钥 / 会话密钥 */
     if (disp)

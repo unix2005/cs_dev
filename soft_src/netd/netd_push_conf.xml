@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  netd_B 配置文件（M5 推送实例：协议进程，公网 TCP）
+  部署路径：/etc/gtkvms/netd_push_conf.xml
+  启动方式：q_service_netd -c /abs/path/netd_push_conf.xml
+
+  与 netd_A（netd_conf.xml，命令连接）的关系：
+    - 同一套二进制、同一套 SM2 身份密钥（客户端内置公钥两实例通用）；
+    - 不同监听端口（18098 vs 18099）、独立 knockd_B（UDP 5002）隐身；
+    - 本实例启用推送反向通路（push_ipc_path 指向 pushd 的 UDS）：
+      客户端 PUSH_BEGIN 时 netd_B 为其建一条到 pushd 的持久 UDS 并起读线程，
+      pushd 的每一帧经该连接原样加密回写。
+    - push_ipc_path 留空即退化为普通 netd 实例（netd_A 的默认形态）。
+-->
+<config>
+    <netd>
+        <!-- TCP 监听端口（推送业务端口；默认被防火墙 filtered，需 knockd_B SPA 敲门放行） -->
+        <listen_port>18098</listen_port>
+
+        <backlog>64</backlog>
+        <nworkers>8</nworkers>
+        <max_queue>1024</max_queue>
+        <poll_timeout_ms>200</poll_timeout_ms>
+
+        <key_id>1</key_id>
+
+        <!-- 命令面转发（本实例以推送为主；保留 bizd 通路，命令连接也能落） -->
+        <ipc_path>/var/run/gtkvms/bizd.sock</ipc_path>
+
+        <!-- M5：pushd 的 Unix Socket 路径（须与 q_service_push -s 一致）。
+             配了才会在 PUSH_BEGIN 时建持久 UDS + 读线程。 -->
+        <push_ipc_path>/var/run/gtkvms/pushd.sock</push_ipc_path>
+
+        <!-- 与 netd_A 共用同一套 SM2 长期密钥对 -->
+        <sm2_priv_file>/etc/gtkvms/netd_sm2.priv</sm2_priv_file>
+        <sm2_pub_file>/etc/gtkvms/netd_sm2.pub</sm2_pub_file>
+
+        <log_file>/var/log/gtkvms/netd_push.log</log_file>
+        <log_level>info</log_level>
+        <log_console>1</log_console>
+        <log_max_size>10485760</log_max_size>
+
+        <enable_ipv6>0</enable_ipv6>
+        <chroot_dir></chroot_dir>
+        <drop_user></drop_user>
+    </netd>
+</config>

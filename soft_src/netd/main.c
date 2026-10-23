@@ -26,6 +26,7 @@
  *   netd_util.c    时间 / 大端序列化 / socket 超时
  *   netd_limit.c   限流矩阵（IP 并发 / 新建速率 / 登录失败拉黑）
  *   netd_ipc.c     netd -> bizd 转发（自建 TLV 分帧）
+ *   netd_push.c    M5 netd_B -> pushd 持久 UDS + 读线程（推送反向通路）
  *   netd_handler.c 业务指令处理器 + 登录流程
  *   netd_srv.c     accept 回调 + 每连接 worker 会话
  */
@@ -98,8 +99,9 @@ int main(int argc, char **argv)
 
     QLOG_INFO(g_netd.log, "netd 启动 (pid=%d, port=%d, workers=%d, queue=%d)",
              (int)getpid(), g_cfg.listen_port, g_cfg.nworkers, g_cfg.max_queue);
-    QLOG_INFO(g_netd.log, "配置: ipc=%s priv=%s pub=%s",
-             g_cfg.ipc_path, g_cfg.priv_file, g_cfg.pub_file);
+    QLOG_INFO(g_netd.log, "配置: ipc=%s push_ipc=%s priv=%s pub=%s",
+             g_cfg.ipc_path, g_cfg.push_ipc_path[0] ? g_cfg.push_ipc_path : "(关)",
+             g_cfg.priv_file, g_cfg.pub_file);
 
     /* SM2 服务端长期密钥对（握手身份认证用）；生产环境须离线生成后部署 */
     if (load_sm2_keypair(&g_netd) != 0)

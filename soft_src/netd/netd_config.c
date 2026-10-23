@@ -82,6 +82,7 @@ void cfg_defaults(void)
     g_cfg.enable_ipv6  = 0;
     g_cfg.chroot_dir[0] = '\0';   /* 空 = 不 chroot（生产建议 /var/empty/netd） */
     g_cfg.drop_user[0]  = '\0';   /* 空 = 不降权（生产建议专用非特权用户 netd） */
+    g_cfg.push_ipc_path[0] = '\0'; /* M5：空 = 不启用推送反向通路（netd_A 默认；netd_B 由 XML 配 pushd.sock） */
     snprintf(g_cfg.ipc_path,  sizeof(g_cfg.ipc_path),  "%s", NETD_IPC_PATH_DEF);
     snprintf(g_cfg.priv_file, sizeof(g_cfg.priv_file), "%s", NETD_PRIV_FILE_DEF);
     snprintf(g_cfg.pub_file,  sizeof(g_cfg.pub_file),  "%s", NETD_PUB_FILE_DEF);
@@ -116,6 +117,11 @@ int load_config(const char *path)
 
     v = q_xcfg_get_string(xc, "config.netd.ipc_path", g_cfg.ipc_path);
     if (v) { snprintf(g_cfg.ipc_path, sizeof(g_cfg.ipc_path), "%s", v); free(v); }
+
+    /* M5：pushd 的 UDS 路径。空（默认）= 本实例不启用推送反向通路；
+       配了就会在 PUSH_BEGIN 时建立到 pushd 的持久 UDS 并起读线程。 */
+    v = q_xcfg_get_string(xc, "config.netd.push_ipc_path", g_cfg.push_ipc_path);
+    if (v) { snprintf(g_cfg.push_ipc_path, sizeof(g_cfg.push_ipc_path), "%s", v); free(v); }
 
     v = q_xcfg_get_string(xc, "config.netd.sm2_priv_file", g_cfg.priv_file);
     if (v) { snprintf(g_cfg.priv_file, sizeof(g_cfg.priv_file), "%s", v); free(v); }

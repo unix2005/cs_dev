@@ -114,6 +114,51 @@ static int hnd_biz(uint16_t cmd, const uint8_t *body, size_t body_len,
     return 0;
 }
 
+/* M5 推送指令处理器 ======================
+ * PUSH_BEGIN：建推送会话（到 pushd 的持久 UDS + 读线程）。语义是 lockstep ——
+ *   客户端必须拿到 RESULT 才知道会话建成，故本 handler 同步完成建链再回结果。
+ *   失败**不**断连：回带结果码，客户端可降级本地 mock（与业务失败同策略）。
+ * PUSH_SUB_DELTA：增量订阅透传 pushd，**免回执**（fire-and-forget；
+ *   TCP 有序 + 服务端本地集合合并即可，回执只会把允许最终一致的操作变成同步瓶颈）。
+ *   注意 out_len 保持 0 —— conn_worker 见 outlen==0 不会回写任何帧。 */
+static int hnd_push_begin(uint16_t cmd, const uint8_t *body, size_t body_len,
+                          uint8_t *out, size_t outcap, size_t *out_len, void *ud)
+{
+    netd_udata_t *u = (netd_udata_t *)ud;
+    uint32_t result = Q_IPC_R_UNAVAILABLE;
+    size_t   off = 0u;
+    char     cid[INET6_ADDRSTRLEN + 128];
+
+    (void)cmd; (void)body; (void)body_len;
+
+    if (!u || !u->g || !u->c)
+        return -1;
+
+    if (push_begin(u->c, &result) != 0)
+    {
+        QLOG_WARN(u->g->log, "PUSH_BEGIN 失败 result=%u %s",
+                  (unsigned)result, netd_cid(u->c, cid, sizeof(cid)));
+    }
+    netd_put_result(out, outcap, &off, result);
+    *out_len = off;
+    return 0;
+}
+
+static int hnd_push_sub_delta(uint16_t cmd, const uint8_t *body, size_t body_len,
+                              uint8_t *out, size_t outcap, size_t *out_len, void *ud)
+{
+    netd_udata_t *u = (netd_udata_t *)ud;
+
+    (void)cmd; (void)out; (void)outcap;
+
+    *out_len = 0u;                      /* 免回执：worker 不会回写任何帧 */
+    if (!u || !u->c)
+        return -1;
+
+    push_forward_delta(u->c, body, body_len);
+    return 0;
+}
+
 /* 把本进程支持的指令注册到分发表；ud 透传给各 handler */
 int netd_disp_init(q_chan_disp_t *d, void *ud)
 {
@@ -134,6 +179,11 @@ int netd_disp_init(q_chan_disp_t *d, void *ud)
         return -1;
     /* SALT_QUERY：登录前拉取账号 salt（方案A），转发 bizd 即可（与业务转发同构） */
     if (q_chan_disp_register(d, Q_CHAN_CMD_SALT_QUERY,  hnd_biz,       ud) != 0)
+        return -1;
+    /* M5 推送域指令（仅 AUTHED 放行，见 q_chan_sm_cmd_allowed） */
+    if (q_chan_disp_register(d, Q_CHAN_CMD_PUSH_BEGIN,     hnd_push_begin,     ud) != 0)
+        return -1;
+    if (q_chan_disp_register(d, Q_CHAN_CMD_PUSH_SUB_DELTA, hnd_push_sub_delta, ud) != 0)
         return -1;
 
     return 0;
@@ -158,7 +208,16 @@ static void login_bind_ids(netd_conn_t *c, const uint8_t *body, size_t blen)
         off += used;
 
         if (tag == Q_IPC_T_USERNAME && vlen > 0u)
+        {
             (void)q_crypto_sm3(val, vlen, c->token.user_id);     /* user_id = SM3(用户名) */
+            /* M5：USERNAME 同时记入连接上下文 —— PUSH_BEGIN 时透传 pushd，
+               按用户名映射组织做报警子树过滤（pushd 只认明文用户名，不认 user_id）。 */
+            {
+                size_t n = vlen < sizeof(c->user_name) ? vlen : sizeof(c->user_name) - 1u;
+                memcpy(c->user_name, val, n);
+                c->user_name[n] = '\0';
+            }
+        }
         else if (tag == Q_IPC_T_DEVID && vlen > 0u)
             memcpy(c->token.device_id, val, vlen > Q_CHAN_DEVID_LEN ? Q_CHAN_DEVID_LEN : vlen);
     }

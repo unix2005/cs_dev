@@ -56,6 +56,10 @@ extern "C" {
 #define NETD_PUB_FILE_DEF    "/etc/gtkvms/netd_sm2.pub"
 #define NETD_LOG_FILE_DEF    "/var/log/gtkvms/netd.log"
 
+/* M5 推送栈：netd_B 到 pushd 的持久 UDS。空 = 本实例不启用推送反向通路
+   （netd_A 不配即整条禁用，两个实例共用同一份源码，端口/IPC 全由 XML 驱动）。 */
+#define NETD_PUSH_IPC_DEF    ""
+
 #define NETD_CONF_ENV        "GTKVMS_NETD_CONF"
 
 /* ===================== §6.4 限流矩阵 ===================== */
@@ -98,6 +102,7 @@ typedef struct
     int      enable_ipv6;
     char     chroot_dir[256]; /* chroot jail 目录（空=不 chroot；生产建议 /var/empty/netd） */
     char     drop_user[64];   /* 降权目标用户名（空=不降权；生产建议专用非特权用户 netd） */
+    char     push_ipc_path[256]; /* M5：pushd 的 UDS 路径（空=不启用推送反向通路） */
 } netd_cfg_t;
 
 typedef struct netd_ctx netd_ctx_t;
@@ -111,6 +116,26 @@ typedef struct
     uint8_t     b[16];   /* 地址字节（v4 仅前 4 字节有效） */
 } netd_addr_t;
 
+/* ===================== M5 推送反向通路（netd_B 专属） =====================
+ * 每条推送客户端连接在 netd_B 侧对应：
+ *   - worker 线程：照旧阻塞收客户端（HELLO/SALT/LOGIN/PUSH_BEGIN/SUB_DELTA）；
+ *   - 一条到 pushd 的持久 UDS（BEGIN 时建立）；
+ *   - 一个读线程：阻塞收 pushd 的 TRAJ/ALARM，经同一 q_chan 加密写回客户端。
+ * 为什么需要 tx_lock：q_chan_transmit 无内部锁且会改 seq_send，worker 的应答
+ *   （BEGIN 的 RESULT）与读线程的推送可能并发，必须外部串行化。
+ * 为什么收包超时不是故障：推送连接无心跳（客户端"无数据是常态"），
+ *   worker 的 q_chan_receive 超时后按 EAGAIN 继续等（与客户端 qc_push_thread 同策略）；
+ *   若一律断连，一条健康的推送连接会每 10s 被误杀一次。 */
+typedef struct
+{
+    q_fd_t          fd;            /* 到 pushd 的持久 UDS；-1 = 未建立 */
+    pthread_t       reader;        /* 读线程句柄 */
+    int             reader_on;     /* 线程已起（join 用） */
+    volatile int    stop;          /* 停止请求（worker 拆链时置位，唤醒读线程） */
+    q_mutex_t       tx_lock;       /* 串行化 q_chan_transmit（worker 应答 + 读线程推送） */
+    int             tx_lock_inited;
+} netd_push_t;
+
 /* 每连接上下文：由 accept 循环分配，worker 线程独占（无需加锁） */
 typedef struct
 {
@@ -118,6 +143,7 @@ typedef struct
     netd_addr_t    src_addr;   /* 源 IP（v4/v6 统一限流键；见 netd_addr_t） */
     uint16_t       src_port;
     q_chan_st_t    st;
+    q_chan_t      *chan;       /* 本连接的安全通道（握手后创建；读线程借它加密回写） */
     uint8_t        channel_id[32];
     q_chan_token_t token;
     int            has_token;
@@ -127,6 +153,9 @@ typedef struct
     netd_ctx_t    *g;
     char           req_id[32];  /* 本请求号：netd 每帧生成，经 IPC REQID TLV 透传 bizd/微服务，
                                    与 bizd->微服务的 JSON "id" 一致，整条链 src_ip#id 相同可关联 */
+    char           user_name[64]; /* M5：LOGIN 业务体的 USERNAME（pushd 按它做报警组织子树过滤）；
+                                    空 = 尚未登录/未提供 */
+    netd_push_t    push;        /* M5：推送反向通路状态（netd_A 上恒为初始态） */
 } netd_conn_t;
 
 /* 把连接端点格式化为 "ip:port"（port 转本机序打印），供日志标识具体连接。
@@ -239,6 +268,18 @@ int ipc_forward(netd_ctx_t *g, const netd_addr_t *src, uint16_t cmd,
 int netd_disp_init(q_chan_disp_t *d, void *ud);
 int do_login(netd_conn_t *c, const uint8_t *body, size_t blen,
              uint8_t *out, size_t outcap, size_t *out_len);
+
+/* ===================== M5 推送反向通路（netd_push.c；netd_B 专属） ===================== */
+/* PUSH_BEGIN：建到 pushd 的持久 UDS -> 发 BEGIN -> 起读线程。
+   成功 0（*result=Q_IPC_R_OK）；失败非 0且 *result 为回给客户端的结果码
+   （UNSUPPORTED=本实例未配 push_ipc_path / UNAVAILABLE=pushd 不可达或拒绝）。 */
+int  push_begin(netd_conn_t *c, uint32_t *result);
+/* PUSH_SUB_DELTA：增量订阅透传 pushd（免回执；未建立 UDS 时静默丢弃） */
+void push_forward_delta(netd_conn_t *c, const uint8_t *body, size_t blen);
+/* 读线程内部用：持 tx_lock 的 q_chan_transmit 封装（worker 侧应答同样走它） */
+int  netd_push_transmit(netd_conn_t *c, const uint8_t *plain, size_t plen, uint16_t cmd);
+/* worker 退出时调用：停读线程 -> join -> 关 UDS（必须在关客户端 fd 之前） */
+void push_teardown(netd_conn_t *c);
 
 /* ===================== 服务器（netd_srv.c） ===================== */
 void conn_worker(void *arg);
