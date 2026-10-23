@@ -14,8 +14,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SOFT_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 LIB_SRC="$SOFT_HOME/lib_src"
-INCLUDE="$SOFT_HOME/include"
-LIB="$SOFT_HOME/lib"
+INCLUDE="${INCLUDE:-$SOFT_HOME/include}"
+# LIB / DEP_HOME / TONGSUO_HOME 可用环境变量覆盖（默认随 SOFT_HOME）：
+# WSL 等跨端场景必须覆盖 LIB —— /mnt/e 上的 lib/ 与 Windows 构建产物共存，
+# 不覆盖会把 Linux .a 与 Windows .a 混在同一目录（表现为链接期抓到错误架构）。
+LIB="${LIB:-$SOFT_HOME/lib}"
+DEP_HOME="${DEP_HOME:-$SOFT_HOME}"
+TONGSUO_HOME="${TONGSUO_HOME:-$DEP_HOME/tongsuo}"
+export LIB DEP_HOME TONGSUO_HOME
 
 mkdir -p "$LIB" "$INCLUDE"
 
@@ -64,8 +70,9 @@ done
 
 echo "== [2/3] 分层构建（l_1 -> l_2 -> l_3）=="
 for m in "${MODULES[@]}"; do
-  echo ">> 构建 $m"
-  ( cd "$LIB_SRC/$m" && make all ) || { echo "构建失败: $m"; exit 1; }
+    echo ">> 构建 $m"
+    ( cd "$LIB_SRC/$m" && make all LIB="$LIB" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" ) ||
+        { echo "构建失败: $m"; exit 1; }
 done
 
 echo "== [3/3] 分层静态检查 check_layer =="
@@ -82,14 +89,16 @@ if [ "$(uname -s)" = "Linux" ]; then
   # 守护进程早已迁到 soft_src/{netd,bizd,knockd}，列表过期后表现为
   # "cd: No such file or directory → 构建失败"，且每次换机器都要重新踩一遍。
   # 新增守护进程请登记到 soft_src/Makefile。
-  echo ">> 构建 soft_src 守护进程（netd / bizd / knockd）"
-  ( cd "$SOFT_HOME/soft_src" && make all ) || { echo "构建失败: soft_src 守护进程"; exit 1; }
+  echo ">> 构建 soft_src 守护进程（netd / bizd / knockd / pushd，清单见 soft_src/Makefile）"
+  ( cd "$SOFT_HOME/soft_src" && make all LIB="$LIB" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" ) ||
+      { echo "构建失败: soft_src 守护进程"; exit 1; }
 
   # 下游微服务（联调用桩实现）：不在守护进程体系内，单独编排。
   for m in q_s_vmsv1__login q_s_vmsv1__biz; do
     if [ -f "$SOFT_HOME/soft_src/$m/Makefile" ]; then
       echo ">> 构建 soft_src/$m"
-      ( cd "$SOFT_HOME/soft_src/$m" && make all ) || { echo "构建失败: $m"; exit 1; }
+      ( cd "$SOFT_HOME/soft_src/$m" && make all LIB="$LIB" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" ) ||
+          { echo "构建失败: $m"; exit 1; }
     fi
   done
 else

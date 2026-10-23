@@ -100,6 +100,17 @@ if command -v file >/dev/null 2>&1; then
 fi
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
+# lib_src 必须最先编：UT/服务都静态链接 lib/ 下的 q_*.a，库里落后于源码时
+# 表现为"服务全就绪却莫名拒绝合法指令"（M5 曾因 libqchan.a 旧了一小时，
+# netd_B 拒收 PUSH_BEGIN）。build.sh 同时编排 soft_src 服务与 login/biz 微服务。
+log "构建 lib_src（l_1~l_3）与 soft_src 服务"
+if ! ( cd "$SOFT_HOME" &&
+       LIB="$LIB_DIR" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" \
+       bash shell/build.sh >/tmp/e2e_m4_lib.log 2>&1 ); then
+    tail -25 /tmp/e2e_m4_lib.log
+    die "lib_src 构建失败（详见 /tmp/e2e_m4_lib.log）"
+fi
+
 log "编译 l_4 与 qc_login_ut"
 if ! ( cd "$SOFT_HOME/lib_src/l_4/q_clientcomm" &&
        make ut_login LIB="$LIB_DIR" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" \

@@ -93,18 +93,30 @@ UT="$SOFT_HOME/lib_src/l_4/q_clientcomm/ut/bin/qc_login_ut"
 
 # 跨端构建残留自检：Windows 构建会在源码树留下 COFF .o，make 只看时间戳不会重编，
 # Linux 链接时表现为 undefined reference 甚至 ld 段错误（反之亦然）。
-QC_DIR="$SOFT_HOME/lib_src/l_4/q_clientcomm"
+# 扫整个 lib_src（不止 q_clientcomm）—— 任一模块混进非 ELF 的 .o 都可能炸链接。
 if command -v file >/dev/null 2>&1; then
-    BAD_O=$(find "$QC_DIR" -name '*.o' -exec file {} \; 2>/dev/null |
+    BAD_O=$(find "$SOFT_HOME/lib_src" -name '*.o' -exec file {} \; 2>/dev/null |
             grep -v 'ELF' | head -1)
     if [ -n "$BAD_O" ]; then
         printf '\033[33m[!]\033[0m 发现非 ELF 的 .o 残留（跨端构建遗留），已清理: %s\n' \
                "$(printf '%s' "$BAD_O" | cut -c1-60)"
-        find "$QC_DIR" -name '*.o' -delete
+        find "$SOFT_HOME/lib_src" -name '*.o' -delete
     fi
 fi
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
+# lib_src 必须最先编：M5 的 q_chan 白名单修复（PUSH_BEGIN 仅 AUTHED 放行）在
+# libqchan.a 里，只编 UT/服务会链到旧库，表现为 netd_B 拒收 cmd=80"状态迁移失败"
+# —— 2026-10-23 真实踩中：VM 的 libqchan.a 比源码旧一小时，五个服务全就绪也没用。
+# build.sh 同时编排 soft_src 服务与 login/biz 微服务（清单以 soft_src/Makefile 为准）。
+log "构建 lib_src（l_1~l_3）与 soft_src 服务"
+if ! ( cd "$SOFT_HOME" &&
+       LIB="$LIB_DIR" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" \
+       bash shell/build.sh >/tmp/e2e_m5_lib.log 2>&1 ); then
+    tail -25 /tmp/e2e_m5_lib.log
+    die "lib_src 构建失败（详见 /tmp/e2e_m5_lib.log）"
+fi
+
 log "编译 l_4 与 qc_login_ut"
 if ! ( cd "$SOFT_HOME/lib_src/l_4/q_clientcomm" &&
        make ut_login LIB="$LIB_DIR" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" \
@@ -112,18 +124,6 @@ if ! ( cd "$SOFT_HOME/lib_src/l_4/q_clientcomm" &&
     tail -25 /tmp/e2e_m5_build.log
     die "UT 编译失败（详见 /tmp/e2e_m5_build.log）"
 fi
-
-# 服务也必须编：netd 新增了 netd_push.c（反向通路），pushd 是全新二进制。
-# e2e_m4 假设服务已预编，这里显式编一遍 —— VM 上留着旧 netd 是 M5 最常见的失败原因。
-log "编译 soft_src 服务（login / bizd / netd / pushd）"
-for svc in q_s_vmsv1__login bizd netd q_s_vmsv1__push; do
-    if ! ( cd "$SOFT_HOME/soft_src/$svc" &&
-           make LIB="$LIB_DIR" DEP_HOME="$DEP_HOME" TONGSUO_HOME="$TONGSUO_HOME" \
-                >"/tmp/e2e_m5_build_$svc.log" 2>&1 ); then
-        tail -25 "/tmp/e2e_m5_build_$svc.log"
-        die "$svc 编译失败（详见 /tmp/e2e_m5_build_$svc.log）"
-    fi
-done
 fi
 for b in q_service_login q_service_bizd q_service_netd q_service_push; do
     [ -x "$SOFT_HOME/bin/$b" ] || die "未生成 $SOFT_HOME/bin/$b"
