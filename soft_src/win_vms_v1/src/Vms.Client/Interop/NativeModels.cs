@@ -39,6 +39,7 @@ internal enum NativeStructKind
     SessionInfo = 7,   // v6：M4 会话状态
     KeeperCfg = 8,     // v6：M4 会话治理参数
     ClientConf = 9,    // v7：客户端 XML 配置
+    Alarm = 10,         // v8：M5 报警事件
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -255,6 +256,39 @@ internal enum NativeConfFlags : uint
     None = 0x0000,
     PlainPassword = 0x0001,   // 配置文件里出现了明文口令（合规红线，UI 应提示）
     Defaulted = 0x0002,       // 关键项走了默认值 —— 配置可能没生效（键名写错？）
+}
+
+/// <summary>M5：推送订阅增量操作的 op（与 native <c>Q_PUSH_OP_*</c> 一致）。</summary>
+internal enum NativePushOp
+{
+    Add = 1,
+    Remove = 2,
+}
+
+/// <summary>
+/// v8（M5）：报警事件（对应 <c>vms_alarm</c>）。
+/// 与轨迹（<c>vms_push_cb</c>）走<b>两个独立回调</b>——报警要按组织子树过滤、进报警面板/Toast，
+/// 语义与"车辆位置更新"完全不同。字段顺序 / 长度 / Pack 必须与 vms_api.h 完全一致，
+/// 启动自检会比对 sizeof。
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeAlarm
+{
+    public const int KeyMax = 40;      // VMS_KEY_MAX：d_vehicleinfo.vehicle_id / d_org_info.org_id
+    public const int PlateMax = 16;    // VMS_PLATE_MAX
+    public const int TimeMax = 24;     // VMS_TIME_MAX："2026-10-16 10:03:49"
+    public const int TextMax = 64;     // VMS_TEXT_MAX：位置 / 报警描述
+
+    public fixed byte VehicleId[KeyMax];  // 车辆主键（车牌+颜色）
+    public fixed byte OrgId[KeyMax];      // 报警所属组织（服务端按用户组织子树判定后下发）
+    public fixed byte Plate[PlateMax];
+    public uint AlarmType;                // VMS_ALARM_* 单值
+    public uint Reserved;
+    public double Lon;                    // GCJ-02
+    public double Lat;
+    public fixed byte Time[TimeMax];
+    public fixed byte Text[TextMax];      // 报警描述（人类可读）
+    public fixed byte Address[TextMax];   // 报警位置描述
 }
 
 /// <summary>从 <c>fixed byte[]</c> 读 UTF-8 字符串的小工具，零分配读取路径。</summary>

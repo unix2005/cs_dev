@@ -57,7 +57,7 @@ public sealed record LoginOptions(
 /// </summary>
 internal sealed unsafe class VmsCoreClient : IDisposable
 {
-    private const uint ExpectedAbiVersion = 7;   // v7：客户端 XML 配置（三端共用键名与默认值）
+    private const uint ExpectedAbiVersion = 8;   // v8：M5 实时推送（vms_alarm + 独立推送长连接）
 
     private readonly DispatcherQueue? _uiQueue;
     private GCHandle _selfHandle;
@@ -81,6 +81,9 @@ internal sealed unsafe class VmsCoreClient : IDisposable
 
     /// <summary>native 推送到达时触发；已在 UI 线程上。</summary>
     public event EventHandler<IReadOnlyList<VehicleRow>>? VehiclesPushed;
+
+    /// <summary>M5：native 报警推送到达时触发（与轨迹独立）；已在 UI 线程上。</summary>
+    public event EventHandler<IReadOnlyList<AlarmRecord>>? AlarmsPushed;
 
     public bool IsConnected => _ctx != IntPtr.Zero && NativeMethods.vms_is_connected(_ctx) == 1;
 
@@ -106,6 +109,7 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             Check(NativeStructKind.SessionInfo, sizeof(NativeSessionInfo), nameof(NativeSessionInfo), mismatches);
             Check(NativeStructKind.KeeperCfg, sizeof(NativeKeeperCfg), nameof(NativeKeeperCfg), mismatches);
             Check(NativeStructKind.ClientConf, sizeof(NativeClientConf), nameof(NativeClientConf), mismatches);
+            Check(NativeStructKind.Alarm, sizeof(NativeAlarm), nameof(NativeAlarm), mismatches);
 
             if (mismatches.Count > 0)
                 return NativeProbeResult.Fail("结构体布局与 native 不一致：" + string.Join("; ", mismatches));
@@ -160,6 +164,8 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             // GCHandle 在这里统一分配（Dispose 释放），推送与会话两个回调共用同一句柄。
             client._selfHandle = GCHandle.Alloc(client, GCHandleType.Normal);
             client.RegisterSessionCallbacks();
+            // M5：报警回调（与轨迹回调 vms_subscribe 相互独立）也早于登录注册。
+            client.RegisterPushCallbacks();
             return client;
         }
         catch
@@ -274,6 +280,19 @@ internal sealed unsafe class VmsCoreClient : IDisposable
 
         var fpRelogin = (IntPtr)(delegate* unmanaged[Cdecl]<IntPtr, nuint, uint, IntPtr, IntPtr, int>)&OnNativeRelogin;
         NativeMethods.vms_set_relogin_callback(_ctx, fpRelogin, ud);
+    }
+
+    /// <summary>
+    /// M5：注册报警推送回调（与轨迹回调相互独立）。**必须在 Login 之前**（Create 里已自动完成）。
+    /// 轨迹回调由 <see cref="Subscribe"/>（vms_subscribe）注册；报警回调走单独的 vms_set_alarm_callback。
+    /// </summary>
+    private void RegisterPushCallbacks()
+    {
+        if (_ctx == IntPtr.Zero || !_selfHandle.IsAllocated) return;
+        var ud = GCHandle.ToIntPtr(_selfHandle);
+
+        var fpAlarm = (IntPtr)(delegate* unmanaged[Cdecl]<IntPtr, IntPtr, void>)&OnNativeAlarm;
+        NativeMethods.vms_set_alarm_callback(_ctx, fpAlarm, ud);
     }
 
     /// <summary>
@@ -562,6 +581,133 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         });
     }
 
+    // ============================== M5：独立推送长连接 ==============================
+
+    /// <summary>
+    /// 启动真实推送长连接（第二条独立 TCP）。会阻塞（敲门 + 握手 + 登录多个往返），
+    /// 调用方须放后台线程。<see cref="Subscribe"/>（vms_subscribe）注册轨迹回调须在之前完成。
+    /// 连不上真实推送服务时 native 转本地 mock 退化、不抛错；仅未登录 / password 空才返回错误。
+    /// </summary>
+    public int PushStart(string password, string? otp = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return NativeMethods.vms_push_start(_ctx, password, otp ?? string.Empty);
+    }
+
+    /// <summary>停止推送长连接（幂等）。订阅集合保留，下次 PushStart 重连后自动全量重放。</summary>
+    public int PushStop()
+    {
+        if (_ctx == IntPtr.Zero) return 0;
+        return NativeMethods.vms_push_stop(_ctx);
+    }
+
+    /// <summary>
+    /// M5：增量订阅（车辆树勾选/取消时调用）。op: <see cref="NativePushOp.Add"/> / Remove；
+    /// ids 为车辆主键字符串（"车牌+颜色"）。大集合 native 端自动分片，调用方无需分批。
+    /// 未启动推送时仅记录到本地订阅集合（启动/重连后自动重放）。
+    /// </summary>
+    public void SubscribeDelta(int op, IReadOnlyList<string> ids)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (ids is null || ids.Count == 0) return;
+
+        // 每辆车编成 UTF-8（自带 \0），再把指针数组钉住 → 传给 native 的 const char* const*。
+        var handles = new IntPtr[ids.Count];
+        var pinned = GCHandle.Alloc(handles, GCHandleType.Pinned);
+        try
+        {
+            for (var i = 0; i < ids.Count; i++)
+                handles[i] = Marshal.StringToCoTaskMemUTF8(ids[i]);
+            var rc = NativeMethods.vms_push_subscribe_delta(_ctx, op, pinned.AddrOfPinnedObject(), (nuint)ids.Count);
+            if (rc != 0)
+                throw new InvalidOperationException($"vms_push_subscribe_delta 失败：{NativeMethods.DescribeError(_ctx, rc)}");
+        }
+        finally
+        {
+            foreach (var h in handles) if (h != IntPtr.Zero) Marshal.FreeCoTaskMem(h);
+            if (pinned.IsAllocated) pinned.Free();
+        }
+    }
+
+    /// <summary>native 报警线程入口。只做数据拷贝，禁止触碰 UI。</summary>
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnNativeAlarm(IntPtr alarm, IntPtr userData)
+    {
+        if (userData == IntPtr.Zero || alarm == IntPtr.Zero) return;
+
+        var client = GCHandle.FromIntPtr(userData).Target as VmsCoreClient;
+        if (client is null || client._disposed) return;
+
+        try
+        {
+            var a = (NativeAlarm*)alarm;
+            var rec = client.ToAlarmRecord(a);
+            client.PostAlarm(rec);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[VmsCoreClient] alarm push failed: {ex}");
+        }
+    }
+
+    private AlarmRecord ToAlarmRecord(NativeAlarm* a)
+    {
+        var vidStr = Utf8.Read(a->VehicleId, NativeAlarm.KeyMax);
+        uint vid = StableHash(vidStr);
+        var (type, level) = MapAlarm(a->AlarmType);
+        var time = Utf8.Read(a->Time, NativeAlarm.TimeMax);
+        return new AlarmRecord
+        {
+            Id = vid * 31u + a->AlarmType,
+            VehicleId = vid,
+            Plate = Utf8.Read(a->Plate, NativeAlarm.PlateMax),
+            DeviceCode = $"T{vid % 900000u + 100000u:D6}",
+            AlarmCode = a->AlarmType,   // 保留原始枚举值：去重键要用，展示层用 AlarmType 文案
+            AlarmTime = string.IsNullOrEmpty(time) ? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") : time,
+            AlarmType = type,
+            Level = level,
+            Lon = a->Lon,
+            Lat = a->Lat,
+            Address = Utf8.Read(a->Address, NativeAlarm.TextMax),
+        };
+    }
+
+    /// <summary>报警类型单值（VMS_ALARM_*）→ 展示文案 / 等级。</summary>
+    private static (string Type, string Level) MapAlarm(uint type) => type switch
+    {
+        0x0001u => ("超速", "一级"),
+        0x0002u => ("疲劳驾驶", "一级"),
+        0x0004u => ("离线超时", "三级"),
+        0x0008u => ("越界", "二级"),
+        0x0010u => ("GNSS丢失", "三级"),
+        _ => ("其他", "三级"),
+    };
+
+    /// <summary>把车辆主键字符串稳定映射成 uint（用于 AlarmRecord.VehicleId / 去重键）。</summary>
+    private static uint StableHash(string s)
+    {
+        uint h = 2166136261u;
+        foreach (var c in s)
+        {
+            h ^= (byte)c;
+            h *= 16777619u;
+        }
+        return h;
+    }
+
+    private void PostAlarm(AlarmRecord rec)
+    {
+        if (_uiQueue is null)
+        {
+            AlarmsPushed?.Invoke(this, new[] { rec });
+            return;
+        }
+        _uiQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
+        {
+            if (!_disposed) AlarmsPushed?.Invoke(this, new[] { rec });
+        });
+    }
+
     // =============================== 释放 ===============================
 
     public void Dispose()
@@ -572,6 +718,7 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         Unsubscribe();
         if (_ctx != IntPtr.Zero)
         {
+            NativeMethods.vms_push_stop(_ctx);     // M5：先停推送连接，再销毁上下文
             NativeMethods.vms_keeper_stop(_ctx);   // M4：先停心跳线程，再销毁上下文
             NativeMethods.vms_destroy(_ctx);
             _ctx = IntPtr.Zero;
@@ -579,6 +726,7 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         _password = null;                          // M4：口令副本不再需要
         if (_selfHandle.IsAllocated) _selfHandle.Free();
         VehiclesPushed = null;
+        AlarmsPushed = null;
         SessionStateChanged = null;
     }
 }

@@ -21,6 +21,8 @@ internal sealed class NativeVehicleDataSource : IVehicleDataSource
         _client = client;
         _version = version;
         _client.VehiclesPushed += (s, e) => VehiclesPushed?.Invoke(this, e);
+        // M5：报警推送（与轨迹独立），VmsCoreClient 已编组回 UI 线程，这里只做转发。
+        _client.AlarmsPushed += (s, e) => AlarmsPushed?.Invoke(this, e);
         // M4：会话状态（在线 / 重连中 / 已断开）由 native 心跳线程发出，
         // VmsCoreClient 已编组回 UI 线程，这里只做转发。
         _client.SessionStateChanged += (s, e) => SessionStateChanged?.Invoke(this, e);
@@ -30,6 +32,9 @@ internal sealed class NativeVehicleDataSource : IVehicleDataSource
     public bool IsNative => true;
 
     public event EventHandler<IReadOnlyList<VehicleRow>>? VehiclesPushed;
+
+    /// <summary>M5：报警推送（与轨迹独立）。</summary>
+    public event EventHandler<IReadOnlyList<AlarmRecord>>? AlarmsPushed;
 
     /// <summary>M4：会话治理状态变化（已在 UI 线程）。</summary>
     public event EventHandler<SessionStatus>? SessionStateChanged;
@@ -55,6 +60,17 @@ internal sealed class NativeVehicleDataSource : IVehicleDataSource
 
     public void StartRealtime() => _client.Subscribe();
     public void StopRealtime() => _client.Unsubscribe();
+
+    /// <summary>M5：启动真实推送长连接。vms_push_start 阻塞（敲门/握手/登录多往返），
+    /// 必须放后台线程；连不上真实服务时 native 转本地 mock 退化、不抛错。</summary>
+    public Task StartPushAsync(string password, string? otp = null)
+        => Task.Run(() => _client.PushStart(password, otp), CancellationToken.None);
+
+    /// <summary>M5：停止推送长连接（幂等）。订阅集合保留，下次重连自动重放。</summary>
+    public void StopPush() => _client.PushStop();
+
+    /// <summary>M5：增量订阅（车辆树勾选/取消）。大集合 native 端自动分片。</summary>
+    public void SubscribeDelta(int op, IReadOnlyList<string> ids) => _client.SubscribeDelta(op, ids);
 
     /// <summary>是否已完成真实后台登录（false = 数据仍是 native 内置 Mock）。</summary>
     public bool IsLoggedIn => _client.IsLoggedIn;

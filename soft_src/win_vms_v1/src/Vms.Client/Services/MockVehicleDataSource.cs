@@ -74,6 +74,12 @@ internal sealed class MockVehicleDataSource : IVehicleDataSource
 
     public event EventHandler<IReadOnlyList<VehicleRow>>? VehiclesPushed;
 
+    // M5：报警推送（模拟数据源不产出真实报警，事件声明即满足接口契约，不会在本类内触发）。
+#pragma warning disable CS0067
+    /// <summary>M5：报警推送（模拟数据源不产出真实报警，留空事件）。</summary>
+    public event EventHandler<IReadOnlyList<AlarmRecord>>? AlarmsPushed;
+#pragma warning restore CS0067
+
     private void BuildCompanyAssignment()
     {
         // 1) 每棵子树的成员集合 —— 过滤语义是"该组织及其所有下级"，
@@ -208,6 +214,11 @@ internal sealed class MockVehicleDataSource : IVehicleDataSource
         _timer?.Dispose();
         _timer = null;
     }
+
+    // M5：推送长连接 / 增量订阅在模拟数据源下无对应后端，留空实现（接口契约完整，UI 不报错）。
+    public Task StartPushAsync(string password, string? otp = null) => Task.CompletedTask;
+    public void StopPush() { }
+    public void SubscribeDelta(int op, IReadOnlyList<string> ids) { }
 
     public void Dispose() => StopRealtime();
 }

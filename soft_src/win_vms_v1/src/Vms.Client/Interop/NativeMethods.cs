@@ -154,6 +154,9 @@ internal static partial class NativeMethods
 
     // ------------------------------- 推送 / 日志 -------------------------------
 
+    // ⚠ M5：vms_subscribe 仍负责注册**轨迹回调**（vms_push_cb）——真实推送长连接
+    //   （vms_push_start）会把轨迹经 ctx->push_cb 抛回 UI，所以即使走真实推送也必须先
+    //   调它注册回调（Windows 上它还会顺带拉起本地 mock 退化线程）。
     [LibraryImport(LibraryName, EntryPoint = "vms_subscribe")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial int vms_subscribe(IntPtr ctx, IntPtr callback, IntPtr userData);
@@ -161,6 +164,32 @@ internal static partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "vms_unsubscribe")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial int vms_unsubscribe(IntPtr ctx);
+
+    /// <summary>
+    /// v8（M5）：启动真实推送长连接（第二条独立 TCP）。会阻塞（SPA 敲门 + SM2 握手 +
+    /// SM4-GCM + 独立 LOGIN + PUSH_BEGIN），调用方须放后台线程。连不上真实推送服务时
+    /// <b>不</b>返回失败（native 转本地 mock 退化），只有参数非法（未登录 / password 空）才 &lt;0。
+    /// </summary>
+    [LibraryImport(LibraryName, EntryPoint = "vms_push_start", StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_push_start(IntPtr ctx, string? password, string? otp);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_push_stop")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_push_stop(IntPtr ctx);
+
+    /// <summary>
+    /// v8（M5）：增量订阅（车辆树勾选/取消时调用）。op: 1=ADD / 2=REMOVE；
+    /// ids 为 <c>const char* const*</c>（车辆主键字符串数组 "车牌+颜色"）。大集合 native 自动分片。
+    /// </summary>
+    [LibraryImport(LibraryName, EntryPoint = "vms_push_subscribe_delta")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_push_subscribe_delta(IntPtr ctx, int op, IntPtr ids, nuint n);
+
+    /// <summary>v8（M5）：注册报警回调（与轨迹回调 vms_subscribe 相互独立）。</summary>
+    [LibraryImport(LibraryName, EntryPoint = "vms_set_alarm_callback")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_set_alarm_callback(IntPtr ctx, IntPtr callback, IntPtr userData);
 
     [LibraryImport(LibraryName, EntryPoint = "vms_last_error")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using Microsoft.UI.Dispatching;
 using Vms.Client.Diagnostics;
+using Vms.Client.Interop;
 using Vms.Client.Models;
 using Vms.Client.Services;
 
@@ -69,6 +70,8 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         Feed.StateChanged += (_, _) => Post(() => { RefreshLoadState(); RebuildPositions(); });
 
         _source.VehiclesPushed += OnVehiclesPushed;
+        // M5：报警推送（与轨迹独立）。无界面消费时同样丢弃本帧（见 OnVehiclesPushed 同款纪律）。
+        _source.AlarmsPushed += OnAlarmsPushed;
 
         Positions = new ObservableCollection<PositionRecord>();
         Alarms = new ObservableCollection<AlarmRecord>();
@@ -650,6 +653,13 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         SelectedVehicle = vehicle;
         OnPropertyChanged(nameof(SelectedVehicleCount));
         OnPropertyChanged(nameof(SelectionSummary));
+
+        // M5：增量订阅 —— 勾上一台车 = 订阅其轨迹/报警；取消 = 退订。
+        // pushd 按车辆主键过滤轨迹、按组织子树过滤报警；这里只传车辆主键即可。
+        if (!string.IsNullOrEmpty(vehicle.VehicleId))
+            PushDelta(selected ? (int)NativePushOp.Add : (int)NativePushOp.Remove,
+                      new[] { vehicle.VehicleId });
+
         await ApplyScopeAsync(ct);
     }
 
@@ -682,6 +692,8 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                 var ids = rows.Select(r => r.VehicleId).Where(s => !string.IsNullOrEmpty(s)).ToList();
                 _orgAddedIds[org.Id] = ids;
                 foreach (var id in ids) _selectedVehicleIds.Add(id);
+                // M5：增量订阅（小组织 = 精确 id 集合）
+                PushDelta((int)NativePushOp.Add, ids);
 
                 // 让树下可见的车辆行也打上勾（先确保车辆已加载，叶子组织 ≤256 量可控）
                 await EnsureVehiclesLoadedAsync(org, ct);
@@ -702,6 +714,11 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                 _scopeCompanyId = org.Id;
                 _scopeCompanyName = org.Name;
                 SelectedCompanyId = org.Id;
+                // M5：大组织走 CompanyId 整树过滤，但推送订阅按车辆主键。本地只持有已加载的车，
+                // 订阅这些（服务端对本会话按 user 组织子树下发的报警仍覆盖全子树）。
+                var loadedIds = org.DescendantsAndSelf().OfType<VehicleNode>()
+                                    .Where(v => v.VehicleId.Length > 0).Select(v => v.VehicleId).ToList();
+                PushDelta((int)NativePushOp.Add, loadedIds);
             }
         }
         else
@@ -716,6 +733,8 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                 foreach (var id in ids) _selectedVehicleIds.Remove(id);
                 _orgAddedIds.Remove(org.Id);
                 SetTreeVehiclesChecked(org, ids, false);
+                // M5：退订（小组织精确 id 集合）
+                PushDelta((int)NativePushOp.Remove, ids);
             }
             else if (_scopeCompanyId == org.Id)
             {
@@ -723,6 +742,10 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                 _scopeCompanyName = string.Empty;
                 SelectedCompanyId = 0;
                 UncheckAllTreeVehicles(org);
+                // M5：退订已加载的车辆（大组织范围取消）
+                var loadedIds = org.DescendantsAndSelf().OfType<VehicleNode>()
+                                    .Where(v => v.VehicleId.Length > 0).Select(v => v.VehicleId).ToList();
+                PushDelta((int)NativePushOp.Remove, loadedIds);
             }
         }
 
@@ -992,6 +1015,39 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
                   (_source.IsNative ? " · 数据来自 native 库" : " · 数据来自内置模拟");
     }
 
+    // M5：报警推送（与轨迹独立）。逐条去重入队，攒一小批再插集合，避免每帧硬插逼 ListView 重排。
+    private void OnAlarmsPushed(object? sender, IReadOnlyList<AlarmRecord> batch)
+    {
+        if (!IsViewActive) return;
+
+        foreach (var rec in batch)
+        {
+            var key = AlarmKey(rec.VehicleId, (AlarmFlags)rec.AlarmCode);
+            if (!_alarmIndex.ContainsKey(key))
+            {
+                _alarmIndex[key] = rec;
+                _alarmPending.Add(rec);
+            }
+        }
+        if (_alarmPending.Count > 0) ScheduleAlarmFlush();
+    }
+
+    /// <summary>
+    /// M5：向推送服务发增量订阅（车辆树勾选/取消时调用）。
+    /// 只在 native 数据源下真实下发；mock / 空集合直接跳过。异常吞掉（订阅失败不应卡 UI）。
+    /// </summary>
+    private void PushDelta(int op, IEnumerable<string> ids)
+    {
+        if (!_source.IsNative) return;
+        var list = ids.Where(s => !string.IsNullOrEmpty(s)).ToList();
+        if (list.Count == 0) return;
+        try { _source.SubscribeDelta(op, list); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Monitor] 推送增量订阅失败(op={op})：{ex}");
+        }
+    }
+
     // --------------------------- 集合重建（结构性变化） ---------------------------
 
     private void RebuildPositions()
@@ -1207,6 +1263,7 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         _source.VehiclesPushed -= OnVehiclesPushed;
+        _source.AlarmsPushed -= OnAlarmsPushed;
         _statsTimer?.Stop();
     }
 }

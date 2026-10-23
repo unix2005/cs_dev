@@ -195,6 +195,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             {
                 BackendBadge = $"{_bundle.Source.BackendName} · 已登录";
                 StatusMessage = $"已连接后台 {opt.Host}:{opt.Port}，状态栏为真实数据";
+
+                // M5：登录成功后启动真实推送长连接（第二条独立 TCP）。
+                // 轨迹回调已由 InitializeAsync 里的 StartRealtime（vms_subscribe）注册，这里只开连接；
+                // 连不上真实推送服务时 native 转本地 mock 退化、不阻断界面，失败仅记录。
+                try
+                {
+                    await native.StartPushAsync(opt.Password, opt.Otp);
+                }
+                catch (Exception ex)
+                {
+                    StatusMessage = $"已登录，但实时推送连接启动失败（退化为静态刷新）：{ex.Message}";
+                }
             }
             else
             {
