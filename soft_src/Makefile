@@ -13,6 +13,7 @@ all:
 	(cd netd;   make)
 	(cd bizd;   make)
 	(cd knockd; make)
+	(cd q_s_vmsv1__push; make)
 	@echo
 	@echo "    Make soft_src servers success !!!"
 
@@ -20,5 +21,6 @@ clean:
 	(cd netd;   make clean)
 	(cd bizd;   make clean)
 	(cd knockd; make clean)
+	(cd q_s_vmsv1__push; make clean)
 	@echo
 	@echo "    Clean soft_src servers okey ..."

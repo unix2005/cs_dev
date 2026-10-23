@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  knockd_B 配置文件（M5 推送栈的 SPA 单包授权进程）
+  部署路径：/etc/gtkvms/knockd_push_conf.xml
+  启动方式：q_service_knockd -c /abs/path/knockd_push_conf.xml
+
+  与 knockd_A（knockd_conf.xml）的关系：
+    - 同一套二进制、同一个 SPA 共享密钥文件、同一张 nft 表/集合；
+    - 不同 UDP 监听端口（5002 vs 5001）；
+    - 客户端对推送端口的敲门打到 5002；knockd 放行的是**请求里带的 reqport**
+      （netd_B 的 18098），与监听端口无关，故两实例可共用 allow4 集合。
+-->
+<config>
+    <knockd>
+        <!-- UDP 监听端口（SPA 包接收，推送栈） -->
+        <listen_port>5002</listen_port>
+
+        <!-- 与 knockd_A 共用同一 SPA 共享密钥文件 -->
+        <spa_key_file>/etc/gtkvms/spa.key</spa_key_file>
+
+        <nft_table>inet spa</nft_table>
+        <nft_set>allow4</nft_set>
+        <nft_set6>allow6</nft_set6>
+
+        <default_ttl>300</default_ttl>
+        <poll_timeout_ms>200</poll_timeout_ms>
+
+        <log_file>/var/log/gtkvms/knockd_push.log</log_file>
+        <log_level>info</log_level>
+        <log_console>1</log_console>
+        <log_max_size>10485760</log_max_size>
+    </knockd>
+</config>
