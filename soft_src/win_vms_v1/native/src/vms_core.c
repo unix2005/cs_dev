@@ -7,6 +7,10 @@
  *   2. **已登录**（vms_login 成功）：会话由 l_4 的 qc_* 门面承载，
  *      数据面在 M2/M3 逐步替换为真实业务请求；M1 先打通登录闭环。
  *
+ * M5：登录成功后可再建**第二条独立长连接**（推送）：独立 knockd/netd 实例、
+ *    独立 q_chan/seq 空间、独立线程，轨迹走 vms_subscribe 的 push_cb、
+ *    报警走 vms_set_alarm_callback 的 alarm_cb。真实推送启动后 mock 让位。
+ *
  * 会话链路（M1）：
  *   C# -> vms_login -> libqclientcomm(qc_*) -> q_chan/q_net/q_codec/q_crypto
  *       -> [UDP SPA 敲门] -> netd:18099 -> UDS bizd -> 登录微服务 9002
@@ -25,6 +29,7 @@
 #include <stdio.h>
 
 #include "qc_client.h"        /* l_4 跨三端共享的客户端通信门面（qc_*） */
+#include "qc_push.h"          /* M5：推送长连接（第二条独立 TCP）*/
 #include "include_ipc_proto.h" /* Q_PBKDF2_ITER_DEFAULT / Q_IPC_R_* 结果码 / 业务参数 tag */
 #include "q_codec.h"          /* q_codec_tlv_decode：解析业务响应 TLV */
 #include "cJSON.h"            /* 下游 JSON 解析（**不走** include_xml.h：后者依赖 libxml2） */
@@ -43,6 +48,21 @@
 #define VMS_MAX_COMPANY          512u
 #define VMS_PUSH_INTERVAL_MS     800u
 #define VMS_PUSH_BATCH           24u
+
+/* —— M5：预启动订阅暂存 ——
+ * push 对象只由 vms_push_start 创建（创建时要带入本次登录的 OTP），
+ * 而 UI 可能在 push_start 之前就勾选车辆。先把这些 delta 按**调用顺序**
+ * 存在这里，启动成功後一次性灌入推送对象（qc_push_sub_delta 在未连接时
+ * 也维护本地集合，灌入后由重连重放兜底）。顺序必须保留：
+ * ADD a,b 再 REMOVE b 的最终集合是 {a}，乱序会错。 */
+#define VMS_PUSH_PENDING_MAX     32u    /* 暂存批次数上限（树勾选一批算一次） */
+#define VMS_PUSH_PENDING_FLUSH   256u   /* 灌入时每批分片的指针数组长度 */
+
+typedef struct vms_push_pending {
+    int      op;                          /* Q_PUSH_OP_ADD / Q_PUSH_OP_REMOVE */
+    uint32_t n;                           /* 有效键个数 */
+    char     (*ids)[VMS_KEY_MAX];         /* 键副本（调用方数组只在本调用内有效） */
+} vms_push_pending_t;
 
 /* 线程本地错误串：不分配堆、不需要调用方 free */
 #ifdef _MSC_VER
@@ -95,6 +115,7 @@ struct vms_context {
     vms_keeper_cfg keeper_cfg;      /* UI 预设的治理参数（vms_keeper_start 传入） */
     int32_t        keeper_cfg_set;  /* 1 = UI 已预设，login 后按其启动；0 = 用全默认 */
     int32_t        keeper_on;       /* keeper 线程是否在运行 */
+    int32_t        keeper_auto_start; /* v7：配置可显式关掉自动治理（默认 1 = 开） */
     vms_session_cb session_cb;      /* 状态变化回调（由 native 心跳线程发出） */
     void*          session_user;
     vms_relogin_cb relogin_cb;      /* 重登取 pwd_hash（令牌过期时用） */
@@ -106,12 +127,35 @@ struct vms_context {
     size_t         devid_len;
     uint32_t       last_hb_rc;      /* 最近一次心跳结果（keeper 运行时由线程更新） */
 
+    /* —— M5：实时推送（第二条独立长连接）—— */
+    qc_push_t*     push;            /* l_4 推送对象（含独立连接/线程/订阅集合） */
+    vms_alarm_cb   alarm_cb;        /* 报警回调（与 push_cb 轨迹相互独立） */
+    void*          alarm_user;
+    char           push_host[VMS_HOST_MAX];   /* 推送寻址（vms_login_with_config 填入原始配置值） */
+    char           push_knock[VMS_HOST_MAX];
+    uint16_t       push_port;
+    int32_t        push_started;    /* 1 = 推送对象已成功启动过（订阅 delta 直通对象） */
+    int32_t        push_real_on;    /* 1 = 真实推送在跑（mock 线程让位，且不再恢复） */
+    char           push_otp[VMS_OTP_MAX];     /* 本次登录的 OTP（对象创建时带入） */
+    vms_push_pending_t push_pending[VMS_PUSH_PENDING_MAX]; /* 预启动订阅暂存 */
+    size_t         push_pending_n;
+
 #ifdef _WIN32
     CRITICAL_SECTION lock;
     HANDLE           push_thread;
     volatile LONG    push_stop;
 #endif
 };
+
+/* v8：wire 级报警类型（Q_PUSH_ALARM_*，定义在 include_ipc_proto.h，三端共用）
+   与 ABI 的 VMS_ALARM_* 必须同值 —— 静态断言把守，一端改另一端编译期即失败，
+   不会出现"服务端发 0x0002、UI 显示未知类型"这种静默错位。 */
+#define VMS_C_ASSERT_EQ(a, b) typedef char vms_cassert_##a[(a) == (b) ? 1 : -1]
+VMS_C_ASSERT_EQ(VMS_ALARM_OVERSPEED, Q_PUSH_ALARM_OVERSPEED);
+VMS_C_ASSERT_EQ(VMS_ALARM_FATIGUE,   Q_PUSH_ALARM_FATIGUE);
+VMS_C_ASSERT_EQ(VMS_ALARM_OFFLINE,   Q_PUSH_ALARM_OFFLINE);
+VMS_C_ASSERT_EQ(VMS_ALARM_GEOFENCE,  Q_PUSH_ALARM_GEOFENCE);
+VMS_C_ASSERT_EQ(VMS_ALARM_GNSS_LOST, Q_PUSH_ALARM_GNSS_LOST);
 
 /* M1：真实会话释放（定义在下方「M1：真实登录闭环」段，此处提前声明供 destroy/disconnect 使用） */
 static void vms_session_close(struct vms_context* ctx);
@@ -305,6 +349,10 @@ static DWORD WINAPI push_thread_proc(LPVOID param)
 
         Sleep(VMS_PUSH_INTERVAL_MS);
         if (InterlockedCompareExchange(&ctx->push_stop, 0, 0) != 0) break;
+        /* M5：真实推送已启动 —— mock 让位。push_real_on 是**粘性**的：
+           一旦真实推送成功起过就不再恢复 mock（要停就由 UI 显式
+           vms_push_stop），避免"停了真实推送又冒出假数据"的困惑。 */
+        if (ctx->push_real_on) continue;
         if (!ctx->push_cb) continue;
 
         /* 在锁内只做数据快照，回调放到锁外调用 —— 回调里若再调本库 API 不会自锁死 */
@@ -350,6 +398,8 @@ size_t VMS_CALL vms_struct_size(int32_t kind)
     case VMS_STRUCT_CREDENTIALS: return sizeof(vms_credentials);
     case VMS_STRUCT_SESSION_INFO: return sizeof(vms_session_info);
     case VMS_STRUCT_KEEPER_CFG:  return sizeof(vms_keeper_cfg);
+    case VMS_STRUCT_CLIENT_CONF: return sizeof(vms_client_conf);   /* v7 */
+    case VMS_STRUCT_ALARM:      return sizeof(vms_alarm);          /* v8 */
     default:                  return 0;
     }
 }
@@ -410,6 +460,9 @@ int32_t VMS_CALL vms_create(const char* config_json, vms_context** out_ctx)
     ctx->stats.excluded        = 0;
     ctx->stats.alarm_unhandled = VMS_MOCK_ALARM_UNHANDLED;
     ctx->stats.online_rate     = (float)VMS_MOCK_TOTAL_ONLINE * 100.0f / (float)VMS_MOCK_TOTAL_VEHICLES;
+
+    /* v7：默认开启自动会话治理；仅配置显式 auto_start=0 时关闭 */
+    ctx->keeper_auto_start = 1;
 
 #ifdef _WIN32
     InitializeCriticalSection(&ctx->lock);
@@ -515,11 +568,72 @@ static int vms_split_ep(const char* s, char* host, size_t cap, int* port)
     return (*port > 0) ? 0 : -1;
 }
 
+/* ---------------------- M5：推送连接装卸（内部辅助） ---------------------- */
+
+/* 预启动暂存清空（释放各批键副本；幂等） */
+static void vms_push_pending_clear(struct vms_context* ctx)
+{
+    size_t i;
+    if (!ctx) return;
+    for (i = 0; i < ctx->push_pending_n; ++i)
+        free(ctx->push_pending[i].ids);
+    memset(ctx->push_pending, 0, sizeof(ctx->push_pending));
+    ctx->push_pending_n = 0u;
+}
+
+/* 把暂存的 delta 按**调用顺序**灌入推送对象（每 256 键一个分片指针数组，栈上）。
+   必须在 qc_push_start 成功之后调用：此时已连接，灌入即发给服务端；
+   即使连接尚未就绪，qc_push_sub_delta 也只会改本地集合，由重连重放兜底。 */
+static void vms_push_pending_flush(struct vms_context* ctx)
+{
+    size_t i;
+
+    if (!ctx || !ctx->push) return;
+    for (i = 0; i < ctx->push_pending_n; ++i)
+    {
+        vms_push_pending_t* b = &ctx->push_pending[i];
+        uint32_t off = 0u;
+        while (off < b->n)
+        {
+            const char* ptrs[VMS_PUSH_PENDING_FLUSH];
+            uint32_t   cnt = (b->n - off > VMS_PUSH_PENDING_FLUSH)
+                             ? (uint32_t)VMS_PUSH_PENDING_FLUSH : (b->n - off);
+            uint32_t   k;
+            for (k = 0; k < cnt; ++k)
+                ptrs[k] = b->ids[off + k];
+            (void)qc_push_sub_delta(ctx->push, b->op, ptrs, cnt);
+            off += cnt;
+        }
+    }
+    vms_push_pending_clear(ctx);
+}
+
+/* 停并销毁推送对象 + 清暂存（幂等）。命令会话关闭/销毁时调用：
+   推送连接持有自己的一次登录 Token，命令会话都没了，它没有存在意义。 */
+static void vms_push_teardown(struct vms_context* ctx)
+{
+    if (!ctx) return;
+    if (ctx->push)
+    {
+        qc_push_destroy(ctx->push);     /* 内部先停接收线程再释放，顺序不能反 */
+        ctx->push = NULL;
+    }
+    vms_push_pending_clear(ctx);
+    ctx->push_started = 0;
+    ctx->push_real_on = 0;
+    ctx->push_otp[0]  = '\0';
+    ctx->push_host[0] = '\0';
+    ctx->push_knock[0] = '\0';
+    ctx->push_port    = 0u;
+}
+
 /* 关闭并释放真实会话（幂等）；Token 与 SPA 密钥立即清零。
-   M4：先停 keeper 线程 —— 否则心跳线程会继续摸这条正在销毁的连接。 */
+   M4：先停 keeper 线程 —— 否则心跳线程会继续摸这条正在销毁的连接。
+   M5：推送长连接随命令会话一并拆除（它持有独立 Token，会话没了它也没意义）。 */
 static void vms_session_close(struct vms_context* ctx)
 {
     if (!ctx) return;
+    vms_push_teardown(ctx);
     if (ctx->sess)
     {
         qc_keeper_stop(ctx->sess);
@@ -796,7 +910,10 @@ int32_t VMS_CALL vms_login(vms_context* ctx, const vms_credentials* cred)
     /* M4：登记重连材料（不含口令）+ 启动会话治理（心跳 / 退避重连 / Token 失效重登）。
        治理线程启动失败不影响登录结果，只是失去自动保活 —— 已由内部记录日志。 */
     vms_keeper_fill_reconnect(ctx);
-    (void)vms_keeper_boot(ctx);
+    /* 配置可显式关闭自动治理（keeper.auto_start=0）：多连接场景（定位/视频各一条）里
+       UI 可能想自己决定何时起 keeper，而不是每次 login 都无条件起一条。 */
+    if (ctx->keeper_auto_start)
+        (void)vms_keeper_boot(ctx);
     return VMS_OK;
 }
 
@@ -882,6 +999,12 @@ int32_t VMS_CALL vms_get_session_info(vms_context* ctx, vms_session_info* out_in
     if (!ctx || !out_info) return VMS_ERR_INVALID_ARG;
     memset(out_info, 0, sizeof(*out_info));
 
+    /* M5：推送面状态。放在 sess 判断之前 —— 推送是独立连接，
+       命令会话未建时它也可能在跑（各自独立登录）。 */
+    out_info->push_connected = (ctx->push && ctx->push_started)
+                               ? (uint32_t)qc_push_connected(ctx->push) : 0u;
+    out_info->push_subs      = ctx->push ? qc_push_sub_count(ctx->push) : 0u;
+
     if (!ctx->sess)
     {
         out_info->state = VMS_SS_IDLE;
@@ -942,6 +1065,203 @@ int32_t VMS_CALL vms_derive_pwd_hash(const char* password, const uint8_t* salt, 
         set_error("PBKDF2-SM3 派生失败", VMS_ERR_INTERNAL);
         return VMS_ERR_INTERNAL;
     }
+    return VMS_OK;
+}
+
+/* ==================== v7：客户端配置（XML，三端共用） ==================== */
+
+/* 内核结构 -> ABI 结构：逐字段拷贝，不 memcpy 整体。
+   两层结构**故意不同**：qc_client_conf_t 是内核内部结构（会随需求演进），
+   vms_client_conf 是 ABI 承诺（只能增字段、不能改布局）。
+   直接 memcpy 等于把内部结构体的布局变化直接暴露给 C# —— 那正是 ABI 要防的事。 */
+static void vms_conf_from_qc(vms_client_conf* d, const qc_client_conf_t* s)
+{
+    memset(d, 0, sizeof(*d));
+
+    snprintf(d->host, sizeof(d->host), "%s", s->server.host);
+    d->port = s->server.port;
+    snprintf(d->pubkey_path, sizeof(d->pubkey_path), "%s", s->server.pubkey_path);
+
+    snprintf(d->user, sizeof(d->user), "%s", s->auth.user);
+    snprintf(d->password, sizeof(d->password), "%s", s->auth.password);
+    snprintf(d->otp, sizeof(d->otp), "%s", s->auth.otp);
+    snprintf(d->devid_hex, sizeof(d->devid_hex), "%s", s->auth.devid_hex);
+    d->pbkdf2_iter = s->auth.pbkdf2_iter;
+
+    snprintf(d->knock, sizeof(d->knock), "%s", s->knock.endpoint);
+    snprintf(d->spa_key_path, sizeof(d->spa_key_path), "%s", s->knock.spa_key_path);
+
+    d->heartbeat_ms    = s->keeper.heartbeat_ms;
+    d->backoff_base_ms = s->keeper.backoff_base_ms;
+    d->backoff_max_ms  = s->keeper.backoff_max_ms;
+    d->max_retry       = s->keeper.max_retry;
+    d->auto_start      = s->keeper.auto_start;
+
+    d->connect_timeout_ms = s->app.connect_timeout_ms;
+    snprintf(d->client_version, sizeof(d->client_version), "%s", s->app.client_version);
+    snprintf(d->log_level, sizeof(d->log_level), "%s", s->app.log_level);
+    snprintf(d->source_path, sizeof(d->source_path), "%s", s->source_path);
+    d->flags = s->flags;
+
+    /* v8（M5）：推送段寻址。原样透传（空/0 = 回退语义由使用方解释） */
+    snprintf(d->push_host, sizeof(d->push_host), "%s", s->push.host);
+    snprintf(d->push_knock, sizeof(d->push_knock), "%s", s->push.knock);
+    d->push_port = s->push.port;
+}
+
+int32_t VMS_CALL vms_load_config(const char* path, vms_client_conf* out_conf)
+{
+    qc_client_conf_t k;
+    int rc;
+
+    if (!out_conf) return VMS_ERR_INVALID_ARG;
+
+    rc = qc_conf_load(path, &k);
+    if (rc != 0)
+    {
+        /* 区分两类失败：路径问题 vs 内容问题。混在一起报，运维会先怀疑 XML 写错了。 */
+        if (rc == -2)
+        {
+            set_error("配置文件不存在（传路径或设 VMS_CLIENT_CONF；"
+                      "默认路径见 vms_config_default_path）", VMS_ERR_NOT_FOUND);
+            return VMS_ERR_NOT_FOUND;
+        }
+        set_error("XML 解析失败", VMS_ERR_INTERNAL);
+        return VMS_ERR_INTERNAL;
+    }
+
+    vms_conf_from_qc(out_conf, &k);
+    /* 内核侧的口令副本必须就地销毁：ABI 结构体已有一份，
+       两份长期驻留内存等于把泄露面翻倍。 */
+    qc_conf_free(&k);
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_config_default_path(char* out_path, size_t cap)
+{
+    if (!out_path || cap == 0u) return VMS_ERR_INVALID_ARG;
+    out_path[0] = '\0';
+    if (qc_conf_default_path(out_path, cap) != 0)
+    {
+        set_error("无法确定默认配置路径", VMS_ERR_INTERNAL);
+        return VMS_ERR_INTERNAL;
+    }
+    return VMS_OK;
+}
+
+/* ABI 结构 -> 内核结构：校验规则只存在一份（在 qc_conf_validate 里），
+   这里做反向映射而不是重新写一遍判断 —— 否则两处规则迟早分叉。 */
+static void vms_conf_to_qc(qc_client_conf_t* d, const vms_client_conf* s)
+{
+    memset(d, 0, sizeof(*d));
+    snprintf(d->server.host, sizeof(d->server.host), "%s", s->host);
+    d->server.port = s->port;
+    snprintf(d->server.pubkey_path, sizeof(d->server.pubkey_path), "%s", s->pubkey_path);
+    snprintf(d->auth.user, sizeof(d->auth.user), "%s", s->user);
+    snprintf(d->auth.password, sizeof(d->auth.password), "%s", s->password);
+    snprintf(d->auth.otp, sizeof(d->auth.otp), "%s", s->otp);
+    snprintf(d->auth.devid_hex, sizeof(d->auth.devid_hex), "%s", s->devid_hex);
+    d->auth.pbkdf2_iter = s->pbkdf2_iter;
+    snprintf(d->knock.endpoint, sizeof(d->knock.endpoint), "%s", s->knock);
+    snprintf(d->knock.spa_key_path, sizeof(d->knock.spa_key_path), "%s", s->spa_key_path);
+
+    /* v8（M5）：推送段（回退语义：空 host -> server.host；port 0 -> server.port；
+       空 knock -> knock.endpoint）。这里就地把回退解掉，下游只用"解后的值"。 */
+    snprintf(d->push.host, sizeof(d->push.host), "%s",
+             s->push_host[0] ? s->push_host : s->host);
+    d->push.port = s->push_port ? s->push_port : s->port;
+    snprintf(d->push.knock, sizeof(d->push.knock), "%s",
+             s->push_knock[0] ? s->push_knock : s->knock);
+}
+
+int32_t VMS_CALL vms_config_validate(const vms_client_conf* conf, char* err, size_t err_cap)
+{
+    qc_client_conf_t k;
+    int              rc;
+
+    if (!conf) return VMS_ERR_INVALID_ARG;
+    if (err && err_cap > 0u) err[0] = '\0';
+
+    vms_conf_to_qc(&k, conf);
+    rc = qc_conf_validate(&k, err, err_cap);
+    qc_conf_free(&k);          /* 内含口令副本 */
+    if (rc < 0) return VMS_ERR_INVALID_ARG;
+    return (int32_t)rc;        /* 0 合法；>0 第一个不合法项编号 */
+}
+
+void VMS_CALL vms_config_free(vms_client_conf* conf)
+{
+    if (!conf) return;
+    memset(conf->password, 0, sizeof(conf->password));
+    memset(conf->otp, 0, sizeof(conf->otp));
+    memset(conf, 0, sizeof(*conf));
+}
+
+int32_t VMS_CALL vms_login_with_config(vms_context* ctx, const vms_client_conf* conf)
+{
+    vms_credentials cred;
+    char            err[256];
+    int32_t         rc;
+
+    if (!ctx || !conf) return VMS_ERR_INVALID_ARG;
+
+    /* 逐项校验后再登录：缺 pubkey 时直接握手等于"跟谁都能握手"，
+       必须在这一步拦下，而不是等中间人出现。 */
+    if (!conf->host[0] || conf->port == 0u || !conf->pubkey_path[0])
+    {
+        set_error("配置不完整：server.host / port / pubkey_path 必填", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+    if (!conf->user[0] || !conf->password[0])
+    {
+        set_error("配置未含口令：请在登录框输入后调用 vms_login", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+    if (vms_config_validate(conf, err, sizeof(err)) > 0)
+    {
+        set_error(err[0] ? err : "配置校验未通过", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+
+    memset(&cred, 0, sizeof(cred));
+    snprintf(cred.host, sizeof(cred.host), "%s", conf->host);
+    cred.port = conf->port;
+    snprintf(cred.user, sizeof(cred.user), "%s", conf->user);
+    snprintf(cred.password, sizeof(cred.password), "%s", conf->password);
+    snprintf(cred.otp, sizeof(cred.otp), "%s", conf->otp);
+    snprintf(cred.devid_hex, sizeof(cred.devid_hex), "%s", conf->devid_hex);
+    snprintf(cred.pubkey_path, sizeof(cred.pubkey_path), "%s", conf->pubkey_path);
+    snprintf(cred.knock, sizeof(cred.knock), "%s", conf->knock);
+    snprintf(cred.spa_key_path, sizeof(cred.spa_key_path), "%s", conf->spa_key_path);
+    cred.pbkdf2_iter = conf->pbkdf2_iter;
+
+    /* keeper 参数必须在 login **之前**预设（login 成功后会按它自动起治理线程）。
+       配置用毫秒、ABI 的 vms_keeper_cfg 用秒：向上取整且保底 1 秒 ——
+       向下取整会把 500ms 变成 0 秒，0 在 boot 里被当成"未设置"而走默认，
+       表现为"我配了 500ms，实际 60s"，且没有任何报错。 */
+    memset(&ctx->keeper_cfg, 0, sizeof(ctx->keeper_cfg));
+    ctx->keeper_cfg.hb_interval_sec  = (conf->heartbeat_ms + 999u) / 1000u;
+    ctx->keeper_cfg.backoff_base_sec = (conf->backoff_base_ms + 999u) / 1000u;
+    ctx->keeper_cfg.backoff_max_sec  = (conf->backoff_max_ms + 999u) / 1000u;
+    if (ctx->keeper_cfg.hb_interval_sec == 0u)  ctx->keeper_cfg.hb_interval_sec = 60u;
+    if (ctx->keeper_cfg.backoff_base_sec == 0u) ctx->keeper_cfg.backoff_base_sec = 1u;
+    if (ctx->keeper_cfg.backoff_max_sec == 0u)  ctx->keeper_cfg.backoff_max_sec = 30u;
+    ctx->keeper_cfg.max_retry = conf->max_retry;
+    ctx->keeper_cfg.tick_ms   = 500u;
+    ctx->keeper_cfg.fault     = 0u;
+    ctx->keeper_cfg_set     = 1;
+    ctx->keeper_auto_start  = conf->auto_start ? 1 : 0;
+
+    rc = vms_login(ctx, &cred);
+    /* 凭据是栈上副本，用完即清 —— 口令不在 native 留第二份 */
+    memset(&cred, 0, sizeof(cred));
+    if (rc != VMS_OK) return rc;
+
+    /* v8（M5）：推送寻址存**原始配置值**（空 = 回退命令连接参数，回退解析统一在
+       vms_push_addr 做，规则只有一份）。vms_login 里的 session_close 已清掉旧值。 */
+    snprintf(ctx->push_host, sizeof(ctx->push_host), "%s", conf->push_host);
+    snprintf(ctx->push_knock, sizeof(ctx->push_knock), "%s", conf->push_knock);
+    ctx->push_port = conf->push_port;
     return VMS_OK;
 }
 
@@ -1623,6 +1943,273 @@ int32_t VMS_CALL vms_unsubscribe(vms_context* ctx)
 #endif
     ctx->push_cb = NULL;
     ctx->push_user = NULL;
+    return VMS_OK;
+}
+
+/* ==================== M5：实时推送（第二条独立长连接） ==================== */
+
+/* 接收线程 -> UI 的轨迹回调适配：qc_traj_t（一车一点一帧）-> vms_vehicle 批量。
+   跑在 l_4 推送接收线程上：UI 侧实现必须自行编组到 UI 线程
+   （C# DispatcherQueue / GTK g_idle_add），直接碰控件必崩。 */
+static void vms_on_push_traj(const qc_traj_t* t, void* ud)
+{
+    struct vms_context* ctx = (struct vms_context*)ud;
+    vms_vehicle         v;
+
+    if (!ctx || !t || !ctx->push_cb) return;
+    memset(&v, 0, sizeof(v));
+    snprintf(v.vehicle_id, sizeof(v.vehicle_id), "%s", t->vehicle_id);
+    v.online      = t->online;
+    v.alarm_flags = t->alarm_flags;
+    v.speed_kph   = (float)t->speed_kph;
+    v.lon         = t->lon;
+    v.lat         = t->lat;
+    snprintf(v.time, sizeof(v.time), "%s", t->time);
+    snprintf(v.location, sizeof(v.location), "%s", t->address);
+    /* day 取 time 前 10 字节（"YYYY-MM-DD"）：UI 按天分组时不必再切一遍。
+       注意 vms_vehicle.day 与 time 同为 VMS_TIME_MAX，不会截断。 */
+    if (t->time[0])
+    {
+        size_t n = strlen(t->time);
+        if (n > 10u) n = 10u;
+        memcpy(v.day, t->time, n);
+        v.day[n] = '\0';
+    }
+    ctx->push_cb(&v, 1u, ctx->push_user);
+}
+
+/* 接收线程 -> UI 的报警回调适配：qc_alarm_t -> vms_alarm。
+   逐字段拷贝（两层结构故意不同，禁 memcpy 跨结构 —— ABI 布局与内核解耦）。 */
+static void vms_on_push_alarm(const qc_alarm_t* a, void* ud)
+{
+    struct vms_context* ctx = (struct vms_context*)ud;
+    vms_alarm           out;
+
+    if (!ctx || !a || !ctx->alarm_cb) return;
+    memset(&out, 0, sizeof(out));
+    snprintf(out.vehicle_id, sizeof(out.vehicle_id), "%s", a->vehicle_id);
+    snprintf(out.org_id, sizeof(out.org_id), "%s", a->org_id);
+    snprintf(out.plate, sizeof(out.plate), "%s", a->plate);
+    out.alarm_type = a->alarm_type;
+    out.lon        = a->lon;
+    out.lat        = a->lat;
+    snprintf(out.time, sizeof(out.time), "%s", a->time);
+    snprintf(out.text, sizeof(out.text), "%s", a->text);
+    snprintf(out.address, sizeof(out.address), "%s", a->address);
+    ctx->alarm_cb(&out, ctx->alarm_user);
+}
+
+/* 推送连接断线重连时向 UI 索取 pwd_hash（与 keeper 同一约定：
+   内核不存口令、不存派生值；UI 无法提供则本轮重建放弃，退避后重试）。 */
+static int vms_on_push_relogin(void* ud, const uint8_t* salt, size_t salt_len,
+                               uint32_t iter, uint8_t pwd_hash_out[32])
+{
+    struct vms_context* ctx = (struct vms_context*)ud;
+    if (!ctx || !ctx->relogin_cb)
+        return -1;
+    return ctx->relogin_cb(salt, salt_len, iter, pwd_hash_out, ctx->relogin_user);
+}
+
+/* 推送寻址解析（**回退语义唯一出处**）：push 段缺省时用命令连接的 server / knock 参数。
+   vms_login_with_config 存的是原始配置值（空 = 未配置），回退在此统一解，
+   避免"登录时解一次、推送启动时再解一次"两套规则打架。 */
+static void vms_push_addr(const struct vms_context* ctx, char* host, size_t host_cap,
+                          uint16_t* port, char* knock, size_t knock_cap)
+{
+    snprintf(host, host_cap, "%s", ctx->push_host[0] ? ctx->push_host : ctx->host);
+    *port = ctx->push_port ? ctx->push_port : ctx->port;
+    snprintf(knock, knock_cap, "%s", ctx->push_knock[0] ? ctx->push_knock : ctx->knock);
+}
+
+int32_t VMS_CALL vms_push_start(vms_context* ctx, const char* password, const char* otp)
+{
+    qc_push_cfg_t pc;
+    uint8_t*      pub = NULL;
+    size_t        pub_len = 0u;
+    char          phost[VMS_HOST_MAX];
+    char          pknock[VMS_HOST_MAX];
+    uint16_t      pport = 0u;
+    int           rc;
+
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    /* 推送连接复用命令连接的账号、服务端公钥与 SPA 密钥：未登录时这些一样都没有 */
+    if (!ctx->sess || !ctx->logged_in)
+    {
+        set_error("尚未登录：推送连接需要命令连接的账号与服务端公钥", VMS_ERR_NOT_CONNECTED);
+        return VMS_ERR_NOT_CONNECTED;
+    }
+    if (!password || !password[0])
+    {
+        set_error("password 不能为空（初始建连需瞬态口令，内核不存储）", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+
+    /* OTP 记忆：推送对象只创建一次，重连时 cfg.otp 沿用本次登录的值。
+       换 OTP 意味着换一次登录（重新登录会整体重建推送对象）。 */
+    snprintf(ctx->push_otp, sizeof(ctx->push_otp), "%s", (otp && otp[0]) ? otp : "000000");
+
+    if (!ctx->push)
+    {
+        /* 服务端静态公钥：与命令连接**共用一套身份密钥**（两个 netd 实例同密钥），
+           所以这里直接复用登录时校验过的那份公钥路径。 */
+        pub = vms_read_file(ctx->pubkey_path, &pub_len);
+        if (!pub || pub_len == 0u || pub_len > QC_PUSH_PUB_DER_MAX)
+        {
+            free(pub);
+            set_error("读取服务端 SM2 公钥失败（推送与命令连接共用）", VMS_ERR_INVALID_ARG);
+            return VMS_ERR_INVALID_ARG;
+        }
+
+        memset(&pc, 0, sizeof(pc));
+        vms_push_addr(ctx, phost, sizeof(phost), &pport, pknock, sizeof(pknock));
+        snprintf(pc.host, sizeof(pc.host), "%s", phost);
+        pc.port = pport;
+        snprintf(pc.knock, sizeof(pc.knock), "%s", pknock);
+        if (ctx->spa_key_len > 0u && ctx->spa_key_len <= sizeof(pc.spa_key))
+        {
+            memcpy(pc.spa_key, ctx->spa_key, ctx->spa_key_len);
+            pc.spa_key_len = ctx->spa_key_len;
+        }
+        pc.spa_key_id = 0u;                    /* 与命令连接一致（同一 knockd 密钥版本） */
+        memcpy(pc.pub_der, pub, pub_len);
+        pc.pub_len  = pub_len;
+        free(pub);
+        pc.seq0     = 1u;                      /* 必须与 netd 一致（仅用于会话密钥派生） */
+        pc.key_id   = 1u;                      /* 必须与 netd 配置一致 */
+        snprintf(pc.user, sizeof(pc.user), "%s", ctx->user);
+        snprintf(pc.otp, sizeof(pc.otp), "%s", ctx->push_otp);
+        if (ctx->devid_len > 0u && ctx->devid_len <= sizeof(pc.devid))
+        {
+            memcpy(pc.devid, ctx->devid, ctx->devid_len);
+            pc.devid_len = ctx->devid_len;
+        }
+        snprintf(pc.cver, sizeof(pc.cver), "vms_core/%d.%d", VMS_VER_MAJOR, VMS_VER_MINOR);
+        pc.pbkdf2_iter     = ctx->pbkdf2_iter;
+        pc.backoff_base_ms = 1000u;
+        pc.backoff_max_ms  = 30000u;
+
+        ctx->push = qc_push_create(&pc);
+        memset(&pc, 0, sizeof(pc));            /* cfg 内含 SPA 密钥，用完即清 */
+        if (!ctx->push)
+        {
+            set_error("创建推送对象失败（寻址/账号不完整？）", VMS_ERR_INTERNAL);
+            return VMS_ERR_INTERNAL;
+        }
+        (void)qc_push_set_callbacks(ctx->push, vms_on_push_traj, vms_on_push_alarm,
+                                    vms_on_push_relogin, ctx);
+    }
+
+    /* 已在跑：qc_push_start 内部先停旧接收线程再重连，订阅集合原样保留、
+       连上后自动全量重放。阻塞（含 knock/握手/登录多个往返），调用方放后台线程。 */
+    rc = qc_push_start(ctx->push, password);
+    if (rc != 0)
+    {
+        /* 连不上**不判失败**：对象与暂存都保留，native 继续走本地 mock 退化
+           （见 vms_subscribe），UI 照常能动；是否重试由 UI 决定
+           （轮询 vms_get_session_info.push_connected 即可感知）。 */
+        if (ctx->log_cb)
+        {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "推送连接建立失败（rc=%d），订阅已保留，可重试 vms_push_start", rc);
+            ctx->log_cb(2, msg, ctx->log_user);
+        }
+        return VMS_OK;
+    }
+
+    ctx->push_started = 1;
+    ctx->push_real_on = 1;                     /* mock 让位（粘性，见 push_thread_proc） */
+
+    /* 预启动暂存的订阅灌入对象：此时已连接，灌入即发给服务端 */
+    vms_push_pending_flush(ctx);
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_push_stop(vms_context* ctx)
+{
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    if (!ctx->push) return VMS_OK;             /* 从未启动：幂等 */
+
+    /* 只停连接与接收线程，**不销毁对象**：订阅集合保留，下次 vms_push_start
+       重连后自动全量重放。要连根清（登出/断开）走 vms_logout/vms_disconnect。 */
+    (void)qc_push_stop(ctx->push);
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_push_subscribe_delta(vms_context* ctx, int32_t op,
+                                          const char* const* ids, size_t n)
+{
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    if (op != (int32_t)Q_PUSH_OP_ADD && op != (int32_t)Q_PUSH_OP_REMOVE)
+    {
+        set_error("op 非法：1=ADD / 2=REMOVE", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+    if (n > 0u && !ids)
+    {
+        set_error("ids 为 NULL 而 n>0", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+    if (n > 0xFFFFFFFFu)
+    {
+        set_error("n 超出范围", VMS_ERR_INVALID_ARG);
+        return VMS_ERR_INVALID_ARG;
+    }
+
+    /* 已启动：直通推送对象。未连接时 l_4 也只改本地集合（唯一真相），
+       连接恢复后由 qc_push_connect 全量重放 —— 调用方无需感知连接状态。 */
+    if (ctx->push && ctx->push_started)
+        return (qc_push_sub_delta(ctx->push, (int)op, ids, (uint32_t)n) == 0)
+               ? VMS_OK : VMS_ERR_NOT_CONNECTED;
+
+    /* 未启动：按调用顺序暂存（顺序即语义：ADD a,b 再 REMOVE b 的最终集合是 {a}），
+       vms_push_start 成功后一次性灌入。 */
+    if (ctx->push_pending_n >= VMS_PUSH_PENDING_MAX)
+    {
+        set_error("预启动订阅暂存已满（尚未调用 vms_push_start？）", VMS_ERR_INTERNAL);
+        return VMS_ERR_INTERNAL;
+    }
+    {
+        vms_push_pending_t* b = &ctx->push_pending[ctx->push_pending_n];
+        uint32_t k = 0u;
+        size_t   i;
+
+        b->op  = (int)op;
+        b->n   = 0u;
+        b->ids = NULL;
+        if (n > 0u)
+        {
+            b->ids = (char (*)[VMS_KEY_MAX])malloc(n * sizeof(*b->ids));
+            if (!b->ids)
+            {
+                set_error("内存不足", VMS_ERR_NO_MEMORY);
+                return VMS_ERR_NO_MEMORY;
+            }
+            for (i = 0; i < n; ++i)
+            {
+                size_t len;
+                /* 空键/超长键跳过 —— 与 l_4 本地集合规则一致（规则只有一份），
+                   超长键不截断：截断会订到另一台车上，比不订更糟。 */
+                if (!ids[i] || !ids[i][0]) continue;
+                len = strlen(ids[i]);
+                if (len >= VMS_KEY_MAX || len >= QC_PUSH_KEY_LEN) continue;
+                memset(b->ids[k], 0, VMS_KEY_MAX);
+                memcpy(b->ids[k], ids[i], len);
+                ++k;
+            }
+        }
+        b->n = k;
+        ++ctx->push_pending_n;
+        /* 整批皆非法键时批次保留（n=0），灌入时是无害空操作 —— 少一条特判分支 */
+    }
+    return VMS_OK;
+}
+
+int32_t VMS_CALL vms_set_alarm_callback(vms_context* ctx, vms_alarm_cb cb, void* user_data)
+{
+    if (!ctx) return VMS_ERR_INVALID_ARG;
+    ctx->alarm_cb   = cb;
+    ctx->alarm_user = user_data;
     return VMS_OK;
 }
 

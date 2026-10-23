@@ -38,6 +38,7 @@ internal enum NativeStructKind
     Credentials = 6,
     SessionInfo = 7,   // v6：M4 会话状态
     KeeperCfg = 8,     // v6：M4 会话治理参数
+    ClientConf = 9,    // v7：客户端 XML 配置
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -202,6 +203,58 @@ internal struct NativeKeeperCfg
     public uint MaxRetry;        // 0 = 无限重连
     public uint TickMs;          // 0 = 500
     public uint Fault;           // 故障注入，生产恒 0
+}
+
+/// <summary>
+/// v7：客户端配置（对应 <c>vms_client_conf</c>）。
+/// 字段顺序 / 长度 / Pack 必须与 vms_api.h 完全一致，启动自检会比对 sizeof。
+///
+/// 解析在 native 侧（l_4 qc_conf_* + l_1 q_xcfg）完成，托管层<b>不解析 XML</b> ——
+/// 键名与默认值只有 C 里那一份，三端才不会各自演化出不同的默认心跳。
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeClientConf
+{
+    public const int HostMax = 64;        // VMS_HOST_MAX
+    public const int PathMax = 260;       // VMS_PATH_MAX
+    public const int UserMax = 64;        // VMS_USER_MAX
+    public const int PassMax = 64;        // VMS_PASS_MAX
+    public const int OtpMax = 16;         // VMS_OTP_MAX
+    public const int DevIdHexMax = 65;    // VMS_DEVID_HEX_MAX
+    public const int CverMax = 32;        // VMS_CVER_MAX
+    public const int LevelMax = 16;       // VMS_LEVEL_MAX
+
+    public fixed byte Host[HostMax];
+    public ushort Port;
+    public ushort Reserved16;
+    public fixed byte PubKeyPath[PathMax];
+    public fixed byte User[UserMax];
+    public fixed byte Password[PassMax];
+    public fixed byte Otp[OtpMax];
+    public fixed byte DevIdHex[DevIdHexMax];
+    public fixed byte Knock[HostMax];
+    public fixed byte SpaKeyPath[PathMax];
+    public uint Pbkdf2Iter;
+    public uint HeartbeatMs;
+    public uint BackoffBaseMs;
+    public uint BackoffMaxMs;
+    public uint MaxRetry;
+    public uint AutoStart;
+    public uint ConnectTimeoutMs;
+    public uint Flags;
+    public uint Reserved;
+    public fixed byte ClientVersion[CverMax];
+    public fixed byte LogLevel[LevelMax];
+    public fixed byte SourcePath[PathMax];
+}
+
+/// <summary><c>VMS_CONF_F_*</c>：配置加载结果的标志位。</summary>
+[Flags]
+internal enum NativeConfFlags : uint
+{
+    None = 0x0000,
+    PlainPassword = 0x0001,   // 配置文件里出现了明文口令（合规红线，UI 应提示）
+    Defaulted = 0x0002,       // 关键项走了默认值 —— 配置可能没生效（键名写错？）
 }
 
 /// <summary>从 <c>fixed byte[]</c> 读 UTF-8 字符串的小工具，零分配读取路径。</summary>

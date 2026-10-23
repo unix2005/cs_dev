@@ -46,6 +46,13 @@ W_SOFT_HOME="$(cd "$SOFT_HOME" && pwd -W)"
 W_LIB="$W_SOFT_HOME/lib"
 W_TONGSUO_LIB="$W_SOFT_HOME/tongsuo/lib"
 W_CJSON="$W_SOFT_HOME/cjson"
+# v7：vms_core 经 l_4 qc_conf_* -> l_1 q_xcfg 读 XML 配置，需 libxml2 及其传递依赖
+# **静态链**（-Bstatic）：MSYS2 包的 lib/ 下同时有 .a 与 .dll.a，而 MinGW 的 -lfoo
+# 优先选 libfoo.dll.a —— 动态方案会让 vms_core.dll 依赖 libxml2-2.dll，
+# 少带一个 DLL 的表现是"vms_core.dll 加载失败"，错误信息完全不提 libxml2，极难排查。
+# 客户端是要分发到用户机器上的，宁可 DLL 大 2MB 也不要这种坑。
+W_LIBXML_DIR="$W_SOFT_HOME/open_src/_deps/winxml/mingw64"
+XML_LIBS="-L$W_LIBXML_DIR/lib -Wl,-Bstatic -lxml2 -lz -llzma -liconv -lcharset -Wl,-Bdynamic"
 
 # cJSON：解析下游业务响应（M2 起 vms_get_stats 走真实查询）
 [ -f "$SOFT_HOME/cjson/lib/libcjson.a" ] || { echo "[vmscore] 缺失 cjson/lib/libcjson.a（先跑 build_cjson_win.sh）" >&2; exit 1; }
@@ -54,9 +61,21 @@ CJSON_INC="-I$W_CJSON/include"
 
 mkdir -p "$NATIVE/build"
 
+# stat64 垫片：MSYS2 预编译 libxml2.a(catalog.o) 引用裸 stat64，llvm-mingw 只有
+# _stat64（详见 open_src/_deps/winshim/stat64_shim.c 头部注释）。仅 MOCK_ONLY=0
+# 需要（--mock-only 不链 libxml2）。编到临时目录，不进源码树。
+STAT64_SHIM_O=""
+if [ "$MOCK_ONLY" -eq 0 ]; then
+    SHIM_SRC="$SOFT_HOME/open_src/_deps/winshim/stat64_shim.c"
+    [ -f "$SHIM_SRC" ] || { echo "[vmscore] 缺失 $SHIM_SRC" >&2; exit 1; }
+    STAT64_SHIM_O="$NATIVE/build/stat64_shim.o"
+    "$CC_BIN" -O2 -c "$SHIM_SRC" -o "$STAT64_SHIM_O" || {
+        echo "[vmscore] stat64 垫片编译失败" >&2; exit 1; }
+fi
+
 STATIC_LIBS=""
 if [ "$MOCK_ONLY" -eq 0 ]; then
-    for m in qclientcomm qchan qspa qsec qcodec qnet qcrypto qrand qreactor qutil qmem qlog; do
+    for m in qclientcomm qchan qspa qsec qcodec qnet qcrypto qrand qreactor qutil qmem qlog qxcfg; do
         [ -f "$SOFT_HOME/lib/lib$m.a" ] || { echo "[vmscore] 缺失 lib$m.a（先跑 build_libsrc_win.sh）" >&2; exit 1; }
         STATIC_LIBS="$STATIC_LIBS $W_LIB/lib$m.a"
     done
@@ -71,7 +90,7 @@ echo "[vmscore] 编译 vms_core.dll（MOCK_ONLY=$MOCK_ONLY）"
     "$NATIVE/src/vms_core.c" \
     -o "$NATIVE/build/vms_core.dll" \
     -Wl,--out-implib,"$NATIVE/build/libvms_core.a" \
-    $STATIC_LIBS $CJSON_A \
+    $STATIC_LIBS $CJSON_A $XML_LIBS $STAT64_SHIM_O \
     -lws2_32 -lbcrypt -lcrypt32 -lpthread -static-libgcc
 
 rc=$?

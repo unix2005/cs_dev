@@ -57,7 +57,7 @@ public sealed record LoginOptions(
 /// </summary>
 internal sealed unsafe class VmsCoreClient : IDisposable
 {
-    private const uint ExpectedAbiVersion = 6;   // v6：M4 会话治理（心跳 / 重连 / 重登 / gate）
+    private const uint ExpectedAbiVersion = 7;   // v7：客户端 XML 配置（三端共用键名与默认值）
 
     private readonly DispatcherQueue? _uiQueue;
     private GCHandle _selfHandle;
@@ -105,6 +105,7 @@ internal sealed unsafe class VmsCoreClient : IDisposable
             Check(NativeStructKind.Credentials, sizeof(NativeCredentials), nameof(NativeCredentials), mismatches);
             Check(NativeStructKind.SessionInfo, sizeof(NativeSessionInfo), nameof(NativeSessionInfo), mismatches);
             Check(NativeStructKind.KeeperCfg, sizeof(NativeKeeperCfg), nameof(NativeKeeperCfg), mismatches);
+            Check(NativeStructKind.ClientConf, sizeof(NativeClientConf), nameof(NativeClientConf), mismatches);
 
             if (mismatches.Count > 0)
                 return NativeProbeResult.Fail("结构体布局与 native 不一致：" + string.Join("; ", mismatches));

@@ -168,14 +168,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// 自动登录：凭据来自环境变量（见 VehicleDataSourceFactory.TryCreateLoginOptionsFromEnvironment）。
-    /// 定位是**联调通道** —— 让"状态栏显示真实数据"无需 UI 改造即可端到端验证；
-    /// 正式的登录对话框 + 凭据保管在 M3 做。
+    /// 自动登录：凭据来自 <b>XML 配置文件</b>（见 VehicleDataSourceFactory.TryCreateLoginOptionsFromConfig）。
+    /// 定位仍是**联调通道** —— 让"状态栏显示真实数据"无需 UI 改造即可端到端验证；
+    /// 正式的登录对话框 + 凭据保管在 M5 做。
+    ///
+    /// 配置里没有口令时**不**尝试登录：口令不落盘是合规红线，宁可停在模拟数据，
+    /// 也不偷偷用空口令去撞后台（那会在服务端留下一串失败审计）。
     /// </summary>
     private async Task TryAutoLoginAsync(CancellationToken ct)
     {
-        var opt = VehicleDataSourceFactory.TryCreateLoginOptionsFromEnvironment();
-        if (opt is null || _bundle.Source is not NativeVehicleDataSource native)
+        var (opt, err) = VehicleDataSourceFactory.TryCreateLoginOptionsFromConfig();
+        if (opt is null)
+        {
+            StatusMessage = err is null
+                ? "未配置登录参数，显示内置模拟数据"
+                : $"未登录（{err}），显示内置模拟数据";
+            return;
+        }
+        if (_bundle.Source is not NativeVehicleDataSource native)
             return;
 
         try

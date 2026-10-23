@@ -127,6 +127,31 @@ internal static partial class NativeMethods
     public static partial int vms_derive_pwd_hash(string password, IntPtr salt, nuint saltLen,
                                                   uint iter, IntPtr outHash);
 
+    // ------------------- v7：客户端配置（XML，三端共用一份键名） -------------------
+    // 解析在 native 完成：返回值 0 成功；VMS_ERR_NOT_FOUND(-3) 文件不存在；
+    // VMS_ERR_INTERNAL(-8) XML 解析失败。
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_load_config", StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_load_config(string? path, out NativeClientConf conf);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_config_default_path")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static unsafe partial int vms_config_default_path(byte* outPath, nuint cap);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_config_validate")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static unsafe partial int vms_config_validate(in NativeClientConf conf,
+                                                         byte* err, nuint errCap);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_config_free")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial void vms_config_free(ref NativeClientConf conf);
+
+    [LibraryImport(LibraryName, EntryPoint = "vms_login_with_config")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial int vms_login_with_config(IntPtr ctx, in NativeClientConf conf);
+
     // ------------------------------- 推送 / 日志 -------------------------------
 
     [LibraryImport(LibraryName, EntryPoint = "vms_subscribe")]

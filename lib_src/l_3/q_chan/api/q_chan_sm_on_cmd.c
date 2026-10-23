@@ -26,6 +26,10 @@ int q_chan_sm_on_cmd(q_chan_st_t *st, uint16_t cmd, int login_ok)
     case Q_CHAN_CMD_BIZ_UPDATE:
     case Q_CHAN_CMD_VIDEO_OPEN:
     case Q_CHAN_CMD_LOGOUT:
+    /* M5：推送域（PUSH_BEGIN 等一次响应建立推送会话；SUB_DELTA 免回执）。
+       两者都只在 AUTHED 放行（白名单已把关），且不改变认证态 —— 与 BIZ_* 同类。 */
+    case Q_CHAN_CMD_PUSH_BEGIN:
+    case Q_CHAN_CMD_PUSH_SUB_DELTA:
         return q_chan_sm_transition(st, Q_CHAN_EV_AUTH_CMD);
     default:
         return -1;

@@ -38,44 +38,50 @@ public static class VehicleDataSourceFactory
         }
     }
     /// <summary>
-    /// 从环境变量装配登录参数（M2：先把「状态栏显示真实数据」这条链路打通，
-    /// 正式登录对话框 / 凭据保管留到 M3）。
+    /// 从 <b>XML 配置文件</b>装配登录参数（v7 起取代环境变量取参）。
     ///
-    /// 必需：VMS_HOST / VMS_USER / VMS_PASS / VMS_PUBKEY
-    /// 可选：VMS_PORT(默认18099) / VMS_OTP / VMS_DEVID_HEX / VMS_KNOCK / VMS_SPA_KEY / VMS_PBKDF2_ITER
-    /// 必需项不全时返回 null —— 此时 native 仍返回内置 Mock，界面照常工作。
+    /// 路径优先级：显式传参 &gt; 环境变量 <c>VMS_CLIENT_CONF</c> &gt; 平台惯例
+    /// （Windows %LOCALAPPDATA%\vms\vms_client.xml，由 native 给出）。
+    /// 解析在 native 侧完成，键名与默认值三端共用一份。
     ///
-    /// 注意口令走环境变量只为联调方便，**生产环境不要这么做**（进程环境可被同权限进程读取），
-    /// 应改为登录框输入 + Windows 凭据管理器保管。
+    /// 返回 <c>(Options, Error)</c>：Error 非空即不可登录，且已是可直接展示给人的原因
+    /// （区分"文件不存在"与"XML 语法错"，排查方向完全不同）。
+    /// 配置里没有口令时也算失败 —— 口令不该落盘，应由登录框输入。
     /// </summary>
-    public static LoginOptions? TryCreateLoginOptionsFromEnvironment()
+    public static (LoginOptions? Options, string? Error) TryCreateLoginOptionsFromConfig(
+        string? configPath = null)
     {
-        var host = Environment.GetEnvironmentVariable("VMS_HOST");
-        var user = Environment.GetEnvironmentVariable("VMS_USER");
-        var pass = Environment.GetEnvironmentVariable("VMS_PASS");
-        var pub  = Environment.GetEnvironmentVariable("VMS_PUBKEY");
+        var r = ClientConfigService.Load(configPath);
+        if (!r.Success)
+            return (null, r.Error);
 
-        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(user)
-            || string.IsNullOrWhiteSpace(pass) || string.IsNullOrWhiteSpace(pub))
-            return null;
+        if (r.Error is not null)
+            return (null, $"配置不完整：{r.Error}");
 
-        var port = 18099;
-        if (int.TryParse(Environment.GetEnvironmentVariable("VMS_PORT"), out var p) && p is > 0 and <= 65535)
-            port = p;
+        var c = r.Config!;
 
-        _ = int.TryParse(Environment.GetEnvironmentVariable("VMS_PBKDF2_ITER"), out var iter);
+        // 口令不落盘是合规红线：配置里没有就走登录框，不偷偷尝试空口令。
+        if (c.NeedsPassword)
+            return (null, "配置未含口令（password 留空）—— 请由登录框输入，口令不得写入配置文件");
 
-        return new LoginOptions(
-            Host: host,
-            Port: port,
-            User: user,
-            Password: pass,
-            Otp: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_OTP")),
-            DeviceIdHex: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_DEVID_HEX")),
-            ServerPubKeyPath: pub,
-            KnockEndpoint: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_KNOCK")),
-            SpaKeyPath: NullIfEmpty(Environment.GetEnvironmentVariable("VMS_SPA_KEY")),
-            Pbkdf2Iterations: iter);
+        return (new LoginOptions(
+            Host: c.Host,
+            Port: c.Port,
+            User: c.User,
+            Password: c.Password!,
+            Otp: c.Otp,
+            DeviceIdHex: c.DeviceIdHex,
+            ServerPubKeyPath: c.PubKeyPath,
+            KnockEndpoint: c.KnockEndpoint,
+            SpaKeyPath: c.SpaKeyPath,
+            Pbkdf2Iterations: c.Pbkdf2Iterations), null);
+    }
+
+    /// <summary>当前生效的配置摘要（供状态栏 / 诊断页展示；口令不出现在其中）。</summary>
+    public static string? DescribeConfig(string? configPath = null)
+    {
+        var r = ClientConfigService.Load(configPath);
+        return r.Success ? r.Config!.Summary : r.Error;
     }
 
     private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;

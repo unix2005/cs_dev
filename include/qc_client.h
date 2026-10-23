@@ -266,10 +266,156 @@ int qc_keeper_wake(qc_session_t *s);
 void qc_keeper_set_fault(qc_session_t *s, uint32_t mask);
 
 /**
- * 填入重连材料（不含口令）：登录成功后调用一次，keeper 断线重建时用它重新敲门 + 连接 + 登录。
+ * 填入重连材料（不含口令）：登录成功后调用一次， keeper 断线重建时用它重新敲门 + 连接 + 登录。
  * 返回 0；-1 参数非法。
  */
 int qc_set_reconnect_info(qc_session_t *s, const qc_reconnect_t *info);
+
+/* ==================== 客户端配置（XML，三端共用一份键名与默认值） ====================
+ *
+ * 为什么要下沉到 l_4：
+ *   配置里装的不是"某个键的值"，而是**业务语义** —— host/port/pubkey 决定抗中间人强度、
+ *   pbkdf2_iter 决定口令派生强度、keeper 三个参数决定断线后的重连风暴半径。
+ *   若各端 UI 自己解析 XML，必然出现「三份键名不一致的默认值」：Windows 默认心跳 60s、
+ *   GTK 默认 5s，表现为"这一端老是掉线、那一端没事"，而日志里完全看不出来。
+ *   故解析与默认值都收敛在这里，UI 各端只负责"把配置文件路径告诉我"。
+ *
+ * XML 形状（键为点分路径，由 l_1/q_xcfg 转 XPath 求值）：
+ *   <vms_client>
+ *     <server>  <host/> <port/> <pubkey_path/> <seq0/> <key_id/> </server>
+ *     <auth>    <user/> <password/> <otp/> <devid_hex/> <pbkdf2_iter/> </auth>
+ *     <knock>   <endpoint/> <spa_key_path/> <req_port/> <req_ttl/> <key_id/> </knock>
+ *     <keeper>  <heartbeat_ms/> <backoff_base_ms/> <backoff_max_ms/> <max_retry/> <auto_start/> </keeper>
+ *     <app>     <client_version/> <log_level/> <connect_timeout_ms/> </app>
+ *     <push>    <host/> <port/> <knock/> </push>   <!-- M5：可省略，省略则回退 server.* -->
+ *   </vms_client>
+ * 全部节点可选：缺失即取默认值，故配置文件可以只写差异项（对运维友好）。
+ *
+ * 口令（安全红线）：
+ *   配置文件**允许**出现 <password>，但加载时会置 QC_CONF_F_PLAIN_PASSWORD 标志并由
+ *   调用方决定是否告警 —— 明文口令落盘在等保三级/密评下是不合格项，
+ *   正式环境应留空、由登录框输入。本层不阻止是为了保住联调与自动化场景，
+ *   但不静默：标志位 + 日志双管齐下，避免"没人知道口令其实躺在一个 xml 里"。
+ */
+#define QC_HOST_MAX       64    /* 主机名 / IPv4 / "ip:port" */
+#define QC_PATH_MAX       260   /* 文件路径（与 VMS_PATH_MAX 对齐） */
+#define QC_USER_MAX       64
+#define QC_PASS_MAX       64
+#define QC_OTP_MAX        16
+#define QC_DEVID_HEX_MAX  65    /* 32B 设备指纹的 hex 文本 + '\0' */
+#define QC_VER_MAX        32
+#define QC_LEVEL_MAX      16
+
+/* 配置标志位 */
+#define QC_CONF_F_NONE            0x0000u
+#define QC_CONF_F_PLAIN_PASSWORD  0x0001u  /* 配置文件里出现了明文口令 */
+#define QC_CONF_F_DEFAULTED       0x0002u  /* 关键项走了默认值（host/port/pubkey 之一缺失） */
+
+typedef struct qc_server_conf {
+    char     host[QC_HOST_MAX];        /* netd 主机：IPv4 或域名 */
+    uint16_t port;                     /* netd 端口（默认 18099） */
+    uint16_t reserved16;
+    char     pubkey_path[QC_PATH_MAX]; /* 服务端静态 SM2 公钥 DER（**必填**，抗中间人） */
+    uint64_t seq0;                     /* 必须与 netd 一致（默认 1） */
+    uint16_t key_id;                   /* 必须与 netd 一致（默认 1） */
+    uint16_t reserved16b;
+    uint32_t reserved;
+} qc_server_conf_t;
+
+typedef struct qc_auth_conf {
+    char     user[QC_USER_MAX];
+    char     password[QC_PASS_MAX];    /* 明文口令；仅联调用，生产留空 */
+    char     otp[QC_OTP_MAX];
+    char     devid_hex[QC_DEVID_HEX_MAX];
+    uint32_t pbkdf2_iter;              /* 0 = 用协议默认 Q_PBKDF2_ITER_DEFAULT */
+    uint32_t reserved;
+} qc_auth_conf_t;
+
+typedef struct qc_knock_conf {
+    char     endpoint[QC_HOST_MAX];    /* knockd 的 "ip:port"；空 = 不敲门 */
+    char     spa_key_path[QC_PATH_MAX];/* SPA 密钥文件（16B SM4 密钥）*/
+    uint16_t req_port;                 /* 申请放行的端口；0 = 取 server.port */
+    uint16_t req_ttl;                  /* 放行时长（秒）；0 = knockd 默认 */
+    uint8_t  key_id;                   /* SPA 密钥版本，须与 knockd 一致 */
+    uint8_t  reserved8[3];
+    uint32_t reserved;
+} qc_knock_conf_t;
+
+typedef struct qc_keeper_conf {
+    uint32_t heartbeat_ms;             /* 心跳间隔（默认 60000） */
+    uint32_t backoff_base_ms;          /* 退避基数（默认 1000） */
+    uint32_t backoff_max_ms;           /* 退避上限（默认 30000） */
+    uint32_t max_retry;                /* 0 = 无限重试 */
+    uint32_t auto_start;               /* 登录成功后自动起 keeper（默认 1） */
+    uint32_t reserved;
+} qc_keeper_conf_t;
+
+typedef struct qc_app_conf {
+    char     client_version[QC_VER_MAX];
+    char     log_level[QC_LEVEL_MAX];
+    uint32_t connect_timeout_ms;
+    uint32_t reserved;
+} qc_app_conf_t;
+
+/* M5 推送段：推送长连接的独立寻址（与命令连接是两条独立 TCP / 两套 knockd+netd 实例）。
+ * 三项全部可省略：host 空 = 用 server.host，port 0 = 用 server.port，
+ * knock 空 = 用 knock.endpoint（单栈部署的兼容形态）。 */
+typedef struct qc_push_conf {
+    char     host[QC_HOST_MAX];        /* netd_B 主机：IPv4 或**域名**（连接层 getaddrinfo） */
+    uint16_t port;                     /* netd_B 的 TCP 端口（默认回退 server.port） */
+    uint16_t reserved16;
+    char     knock[QC_HOST_MAX];       /* knockd_B 的 UDP 端点 "host:port"；空 = 用 knock.endpoint */
+    uint32_t reserved;
+} qc_push_conf_t;
+
+typedef struct qc_client_conf {
+    qc_server_conf_t server;
+    qc_auth_conf_t   auth;
+    qc_knock_conf_t  knock;
+    qc_keeper_conf_t keeper;
+    qc_app_conf_t    app;
+    qc_push_conf_t   push;             /* M5：推送长连接寻址 */
+    uint32_t flags;                    /* QC_CONF_F_* */
+    uint32_t reserved;
+    char     source_path[QC_PATH_MAX]; /* 实际加载的文件路径（排障用） */
+} qc_client_conf_t;
+
+/** 填充出厂默认值（不读文件）。c 必须非 NULL。返回 0。 */
+int qc_conf_default(qc_client_conf_t *c);
+
+/**
+ * 加载 XML 配置文件：先 qc_conf_default 再逐项覆盖。
+ *   path : 配置文件路径；NULL 或空串 = 用 qc_conf_default_path() 的默认路径
+ * 返回 0 成功（缺失项走默认，flags 会记 QC_CONF_F_DEFAULTED）；
+ *       -1 参数非法；-2 文件不存在或打不开；-3 XML 解析失败；-4 内存不足。
+ * 注意：本函数不校验业务必填项（host/user/pubkey），校验由 qc_conf_validate 负责 ——
+ *       分开是为了让 UI 能先"加载出一份可读的配置"再决定怎么提示，而不是一错到底。
+ */
+int qc_conf_load(const char *path, qc_client_conf_t *out);
+
+/**
+ * 业务校验：host/port/pubkey_path 必填；port 在 1..65535；pbkdf2_iter 为 0 或 >= 100000。
+ *   err/err_cap : 可选的人类可读原因（口令不会写进去）
+ * 返回 0 合法；-1 参数非法；>0 第一个不合法项的编号（1=host 2=port 3=pubkey 4=iter）。
+ */
+int qc_conf_validate(const qc_client_conf_t *c, char *err, size_t err_cap);
+
+/** 清零敏感字段（口令/OTP）并整体归零。c 可为 NULL。 */
+void qc_conf_free(qc_client_conf_t *c);
+
+/**
+ * 三端默认配置文件路径。查找顺序：
+ *   1) 环境变量 VMS_CLIENT_CONF（显式指定，联调/多实例用）
+ *   2) 平台惯例：Win=%LOCALAPPDATA%\vms\vms_client.xml（无则用 .\vms_client.xml）
+ *                Linux=$XDG_CONFIG_HOME|~/.config/vms/vms_client.xml
+ *                macOS=~/Library/Application Support/vms/vms_client.xml
+ * out 为 NULL 时仅返回"是否有可用默认路径"（1/0），便于调用方先探测。
+ * 返回 0 成功写入 out；-1 参数非法或无法确定（此时 out[0]='\0'）。
+ */
+int qc_conf_default_path(char *out, size_t cap);
+
+/** 打印配置（调试用，输出到 fp）。口令与 OTP 一律打 ****，防止日志泄漏。 */
+void qc_conf_dump(const qc_client_conf_t *c, void *fp);
 
 #ifdef __cplusplus
 }

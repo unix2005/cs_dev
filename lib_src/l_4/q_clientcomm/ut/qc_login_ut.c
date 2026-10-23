@@ -68,7 +68,12 @@ typedef struct
     uint32_t    max_retry;    /* 连续失败转 OFFLINE 的阈值；0=无限 */
     int         concurrent;   /* 并发业务线程数（验证 gate 串行化）；0=不做 */
     int         case_sel;     /* 只跑第 N 个治理用例（0=全部）。联调环境对单条命令时长敏感时用它拆开跑 */
+    const char *conf;         /* v7：XML 配置文件路径；给出时覆盖上面的命令行参数 */
 } args_t;
+
+/* 配置加载结果的存放处：args_t 里都是指向 argv 的指针，而配置内容是**新字符串**，
+   必须有独立存储。放静态区（进程生命周期）—— UT 全程都要用到。 */
+static qc_client_conf_t g_conf;
 
 /* 用例过滤：CASE(n) 为真才执行第 n 个用例 */
 #define CASE(n)  ((a.case_sel) == 0 || (a.case_sel) == (n))
@@ -246,6 +251,7 @@ static int parse_args(int argc, char **argv, args_t *a)
         else if (!strcmp(k, "--max-retry"))   a->max_retry   = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(k, "--concurrent"))  a->concurrent  = atoi(argv[++i]);
         else if (!strcmp(k, "--case"))        a->case_sel    = atoi(argv[++i]);
+        else if (!strcmp(k, "--conf"))        a->conf        = argv[++i];
         else if (!strcmp(k, "--keep"))    a->keep    = 1;
         else if (!strcmp(k, "--v"))       a->verbose = 1;
         else

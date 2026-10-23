@@ -75,6 +75,62 @@
 #define Q_IPC_T_PAGE_OFFSET 0x0203u  /* 分页偏移（uint32 BE） */
 #define Q_IPC_T_PAGE_LIMIT  0x0204u  /* 每页条数（uint32 BE） */
 
+/* ===================== 推送域 TLV（M5：netd_B <-> q_s_vmsv1__push / 密文体内层） =====================
+ * 三处共用同一组 tag，严禁各端重复定义：
+ *   1) 客户端 <-> netd_B 的密文体内层（SUB_DELTA 请求体 / TRAJ / ALARM 负载）；
+ *   2) netd_B <-> pushd 的 UDS 帧内层（Q_IPC_T_BODY 里就是这组 tag）；
+ *   3) pushd 内部会话/订阅集合的解析。
+ *
+ * 承载类型（必须严格遵守）：
+ *   Q_IPC_T_PUSH_OP      : 1B（1=ADD / 2=REMOVE）
+ *   Q_IPC_T_PUSH_VID     : UTF-8 文本（车辆主键，无 NUL；SUB_DELTA 中可多次出现）
+ *   Q_IPC_T_PUSH_LON/LAT : 8B double 的 IEEE754 位型大端（memcpy 到 uint64 后逐字节 BE）
+ *   Q_IPC_T_PUSH_SPEED   : uint32 BE（km/h）
+ *   Q_IPC_T_PUSH_TV      : UTF-8 文本（"YYYY-MM-DD HH:MM:SS"）
+ *   Q_IPC_T_PUSH_ADDR    : UTF-8 文本（位置描述）
+ *   Q_IPC_T_PUSH_ONLINE  : uint32 BE（0/1）
+ *   Q_IPC_T_PUSH_AFLAGS  : uint32 BE（报警位掩码，VMS_ALARM_*）
+ *   Q_IPC_T_PUSH_ATYPE   : uint32 BE（报警类型，VMS_ALARM_* 单值）
+ *   Q_IPC_T_PUSH_ATEXT   : UTF-8 文本（报警描述）
+ *   Q_IPC_T_PUSH_ORG     : UTF-8 文本（报警所属组织 org_id）
+ *   Q_IPC_T_PUSH_PLATE   : UTF-8 文本（车牌）
+ *
+ * 推送【不分页】（2026-10-23 裁定）：轨迹/报警都是按车辆逐条事件驱动下发，单帧几十字节，
+ * 不存在"一页 N 条"。唯一受 Q_IPC_TLV_MAX(60000) 约束的是 C→S 的大订阅集合：
+ * 此时用【分片 delta】—— 一次大 ADD/REMOVE 拆成多帧 PUSH_SUB_DELTA（每帧 <= 500 个 ID），
+ * 服务端逐帧合并；分片是同一语义的增量续传，没有 page 序号，与分页查询本质不同。 */
+#define Q_IPC_T_PUSH_OP     0x0301u  /* 订阅操作：1B（1=ADD / 2=REMOVE） */
+#define Q_IPC_T_PUSH_VID    0x0302u  /* 车辆 ID（UTF-8 文本；SUB_DELTA 可多次出现） */
+#define Q_IPC_T_PUSH_LON    0x0303u  /* 经度：double 位型大端 8B */
+#define Q_IPC_T_PUSH_LAT    0x0304u  /* 纬度：double 位型大端 8B */
+#define Q_IPC_T_PUSH_SPEED  0x0305u  /* 速度：uint32 BE（km/h） */
+#define Q_IPC_T_PUSH_TV     0x0306u  /* 轨迹时间：UTF-8 文本 */
+#define Q_IPC_T_PUSH_ADDR   0x0307u  /* 位置描述：UTF-8 文本 */
+#define Q_IPC_T_PUSH_ONLINE 0x0308u  /* 在线标志：uint32 BE */
+#define Q_IPC_T_PUSH_AFLAGS 0x0309u  /* 报警位掩码：uint32 BE */
+#define Q_IPC_T_PUSH_ATYPE  0x030Au  /* 报警类型：uint32 BE */
+#define Q_IPC_T_PUSH_ATEXT  0x030Bu  /* 报警描述：UTF-8 文本 */
+#define Q_IPC_T_PUSH_ORG    0x030Cu  /* 报警所属组织 org_id：UTF-8 文本 */
+#define Q_IPC_T_PUSH_PLATE  0x030Du  /* 车牌：UTF-8 文本 */
+
+/* 订阅操作取值（Q_IPC_T_PUSH_OP 的 val） */
+#define Q_PUSH_OP_ADD    1u
+#define Q_PUSH_OP_REMOVE 2u
+
+/* 报警类型（Q_IPC_T_PUSH_ATYPE / AFLAGS 的取值）。
+   与 native ABI 的 VMS_ALARM_* **必须同值** —— vms_core.c 内有静态断言把守，
+   一端改另一端编译期即失败，不会静默错位。 */
+#define Q_PUSH_ALARM_NONE      0x0000u
+#define Q_PUSH_ALARM_OVERSPEED 0x0001u  /* 超速 */
+#define Q_PUSH_ALARM_FATIGUE   0x0002u  /* 疲劳驾驶 */
+#define Q_PUSH_ALARM_OFFLINE   0x0004u  /* 掉线 */
+#define Q_PUSH_ALARM_GEOFENCE  0x0008u  /* 越界 */
+#define Q_PUSH_ALARM_GNSS_LOST 0x0010u  /* GNSS 失锁 */
+
+/* 单帧 PUSH_SUB_DELTA 最多携带的车辆 ID 数（分片阈值）。
+   500 x (4+2+40) ≈ 23KB，留足 Q_IPC_TLV_MAX(60000) 余量（netd 还要包外层 TLV）。 */
+#define Q_PUSH_SHARD_MAX 500u
+
 /* ===================== 口令派生参数（方案A：服务端下发 salt，客户端本地派生） =====================
  * 客户端（Windows/Linux/macOS 三端）与登录服务【必须】使用同一组 (salt, iter)：
  * salt 由登录服务持有、经 SALT_QUERY(cmd=4) 下发；iter 作为协议常量定义在此，

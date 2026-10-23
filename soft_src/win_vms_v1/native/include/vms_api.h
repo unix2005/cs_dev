@@ -40,7 +40,14 @@ extern "C" {
 #endif
 
 /* --------------------------------- 版本 ----------------------------------- */
-/* v6：新增会话治理（M4）：vms_keeper_start/stop、vms_get_session_info、
+/* v8：M5 实时推送。新增 vms_alarm 结构体与 vms_alarm_cb（报警与轨迹两个独立回调）、
+        vms_push_start/stop、vms_push_subscribe_delta、vms_set_alarm_callback；
+        vms_client_conf 尾部追加 push_host/push_knock/push_port（推送长连接独立寻址，
+        空/0 回退命令连接参数）。仅新增函数与尾部字段，不改既有布局。
+    v7：新增客户端 XML 配置（M7 配置层先行落地）：vms_load_config /
+        vms_config_default_path / vms_config_validate / vms_config_free /
+        vms_login_with_config + vms_client_conf 结构体。
+    v6：新增会话治理（M4）：vms_keeper_start/stop、vms_get_session_info、
         vms_set_session_callback / vms_set_relogin_callback、vms_lock/unlock、
         vms_derive_pwd_hash。仅新增函数与结构（尾部追加），不改既有布局。
     v5：vms_query.ids 由 uint32[] 改为「库表主键字符串数组」char[][VMS_KEY_MAX]，
@@ -53,9 +60,9 @@ extern "C" {
         新字段 org_id 仍放在结构体尾部，v4 调用方不碰 ids 时可继续编译。
    v4：vms_company 追加 org_id、vms_vehicle 追加 vehicle_id/org_id（M3 业务列表）。
    v3：新增 vms_credentials + vms_login/vms_logout/vms_heartbeat（M1 登录闭环）。 */
-#define VMS_ABI_VERSION  6u
+#define VMS_ABI_VERSION  8u
 #define VMS_VER_MAJOR    1
-#define VMS_VER_MINOR    1
+#define VMS_VER_MINOR    2
 #define VMS_VER_PATCH    0
 
 /* -------------------------------- 错误码 ---------------------------------- */
@@ -148,6 +155,22 @@ typedef struct vms_vehicle {
 #define VMS_ALARM_OFFLINE   0x0004u  /* 掉线 */
 #define VMS_ALARM_GEOFENCE  0x0008u  /* 越界 */
 #define VMS_ALARM_GNSS_LOST 0x0010u  /* GNSS 失锁 */
+
+/* v8（M5）：报警事件。与轨迹（vms_push_cb）走**两个独立回调**——
+   报警要按组织子树过滤、要进报警面板/Toast，语义与"车辆位置更新"完全不同，
+   塞进同一个回调会让 UI 侧每帧都做一次"这是轨迹还是报警"的判别。 */
+typedef struct vms_alarm {
+    char     vehicle_id[VMS_KEY_MAX];  /* 车辆主键（车牌+颜色） */
+    char     org_id[VMS_KEY_MAX];      /* 报警所属组织（服务端按用户组织子树判定后下发） */
+    char     plate[VMS_PLATE_MAX];
+    uint32_t alarm_type;               /* VMS_ALARM_* 单值 */
+    uint32_t reserved;
+    double   lon;                      /* GCJ-02 */
+    double   lat;
+    char     time[VMS_TIME_MAX];
+    char     text[VMS_TEXT_MAX];       /* 报警描述（人类可读） */
+    char     address[VMS_TEXT_MAX];    /* 报警位置描述 */
+} vms_alarm;
 
 /* 单次查询最多按多少个车辆 ID 过滤（覆盖"在树上勾选一整页"的场景）。
    v5：单页上限是 100（见 BIZ_PAGE_LIMIT_MAX），勾选不会超过一页，128 留足余量；
@@ -243,6 +266,9 @@ typedef struct vms_session_info {
     uint64_t next_hb_ms;        /* 下次心跳时刻 */
     uint64_t next_retry_ms;     /* 下次重连时刻（RECONNECTING 有效） */
     char     detail[96];        /* 最近一次事件描述（UTF-8） */
+    /* v8（M5）尾追：推送长连接状态（第二条独立 TCP，与上方命令通道各自独立） */
+    uint32_t push_connected;    /* 1 = 推送连接就绪（正在收轨迹/报警） */
+    uint32_t push_subs;         /* 当前订阅车辆数 */
 } vms_session_info;
 
 typedef struct vms_keeper_cfg {
@@ -260,6 +286,65 @@ typedef struct vms_keeper_cfg {
 #define VMS_FAULT_HB_RC3       0x0002u  /* 心跳返回结果码 3（Token 过期） */
 #define VMS_FAULT_RELOGIN_FAIL 0x0004u  /* 重登必定失败 */
 
+/* ==================== v7：客户端配置（XML，三端共用） ====================
+ *
+ * 为什么解析不放在 UI 层：
+ *   配置里装的不是"某个键的值"而是**业务语义** —— host/port/pubkey 决定抗中间人强度、
+ *   pbkdf2_iter 决定口令派生强度、keeper 三个参数决定断线后的重连风暴半径。
+ *   若各端 UI 自己解析 XML，必然出现三份键名与默认值：Windows 默认心跳 60s、GTK 5s，
+ *   表现为"这一端老掉线、那一端没事"，而日志里完全看不出来。故统一在 l_4 内核解析，
+ *   UI 只负责"把配置文件路径告诉我"。
+ *
+ * 扁平结构（不用嵌套）：跨 ABI 传结构体时，嵌套会把"对齐"变成隐式契约，
+ *   一旦某端编译器选项不同就整体错位；扁平 + 全定长 char 数组最稳。
+ *
+ * 口令：允许配置里出现 <password>（保住联调与自动化），但加载时会置
+ *   VMS_CONF_F_PLAIN_PASSWORD 标志，UI 应据此提示 —— 明文口令落盘在等保三级/
+ *   密评下是不合格项，正式环境应留空、由登录框输入。
+ *
+ * v8（M5）：追加 push_host / push_port / push_knock 三个定长字段（追加在尾部，
+ *   前 7 版布局不动）—— 推送长连接是第二条独立 TCP，走独立 knockd/netd 实例，
+ *   地址必须与命令连接分开配（含域名）。三者均可空/0：空即回退用 host/port/knock，
+ *   兼容"推送与命令同栈"的单实例部署。
+ */
+#define VMS_CVER_MAX    32
+#define VMS_LEVEL_MAX   16
+
+#define VMS_CONF_F_NONE           0x0000u
+#define VMS_CONF_F_PLAIN_PASSWORD 0x0001u  /* 配置文件里出现了明文口令 */
+#define VMS_CONF_F_DEFAULTED      0x0002u  /* 关键项走了默认值（配置可能没生效） */
+
+typedef struct vms_client_conf {
+    char     host[VMS_HOST_MAX];
+    uint16_t port;                       /* netd 端口 */
+    uint16_t reserved16;
+    char     pubkey_path[VMS_PATH_MAX];  /* 服务端静态 SM2 公钥 DER（**必填**） */
+    char     user[VMS_USER_MAX];
+    char     password[VMS_PASS_MAX];     /* 明文口令；生产留空由登录框输入 */
+    char     otp[VMS_OTP_MAX];
+    char     devid_hex[VMS_DEVID_HEX_MAX];
+    char     knock[VMS_HOST_MAX];        /* knockd "ip:port"；空 = 不敲门 */
+    char     spa_key_path[VMS_PATH_MAX]; /* SPA 密钥文件（16B） */
+    uint32_t pbkdf2_iter;                /* 0 = 协议默认 100000 */
+    uint32_t heartbeat_ms;
+    uint32_t backoff_base_ms;
+    uint32_t backoff_max_ms;
+    uint32_t max_retry;                  /* 0 = 无限重试 */
+    uint32_t auto_start;                 /* 登录成功后自动起 keeper */
+    uint32_t connect_timeout_ms;
+    uint32_t flags;                      /* VMS_CONF_F_* */
+    uint32_t reserved;
+    char     client_version[VMS_CVER_MAX];
+    char     log_level[VMS_LEVEL_MAX];
+    char     source_path[VMS_PATH_MAX];  /* 实际加载的文件路径（排障用） */
+    /* ---- v8（M5）推送段：第二条长连接的独立寻址；空/0 = 回退上面对应项 ---- */
+    char     push_host[VMS_HOST_MAX];    /* netd_B 主机：IPv4 或**域名**；空 = 用 host */
+    char     push_knock[VMS_HOST_MAX];   /* knockd_B 的 UDP 端点 "host:port"；空 = 用 knock */
+    uint16_t push_port;                  /* netd_B TCP 端口；0 = 用 port */
+    uint16_t push_reserved;
+    uint32_t push_reserved2;
+} vms_client_conf;
+
 typedef struct vms_context vms_context; /* 不透明句柄（opaque handle） */
 
 #pragma pack(pop)
@@ -273,12 +358,17 @@ typedef enum vms_struct_kind {
     VMS_STRUCT_QUERY    = 5,
     VMS_STRUCT_CREDENTIALS = 6,
     VMS_STRUCT_SESSION_INFO = 7,     /* v6：M4 会话状态（state / 统计 / 事件描述） */
-    VMS_STRUCT_KEEPER_CFG  = 8       /* v6：M4 会话治理参数 */
+    VMS_STRUCT_KEEPER_CFG  = 8,      /* v6：M4 会话治理参数 */
+    VMS_STRUCT_CLIENT_CONF = 9,      /* v7：客户端 XML 配置（三端共用一份键名与默认值） */
+    VMS_STRUCT_ALARM       = 10      /* v8：M5 报警事件 */
 } vms_struct_kind;
 
 /* ------------------------------- 回调类型 --------------------------------- */
 /* 实时推送：items 指向的数组在回调返回后即失效，调用方必须在回调内拷贝。 */
 typedef void (VMS_CALL *vms_push_cb)(const vms_vehicle* items, size_t count, void* user_data);
+/* v8（M5）：报警推送。与轨迹分离的独立回调（报警按组织子树过滤，走报警面板/Toast）。
+   a 指向的单条报警在回调返回后即失效，调用方必须拷贝。 */
+typedef void (VMS_CALL *vms_alarm_cb)(const vms_alarm* a, void* user_data);
 /* 日志回调，level: 0=debug 1=info 2=warn 3=error */
 typedef void (VMS_CALL *vms_log_cb)(int32_t level, const char* msg, void* user_data);
 
@@ -360,6 +450,32 @@ VMS_API int32_t VMS_CALL vms_derive_pwd_hash(const char* password,
                                              const uint8_t* salt, size_t salt_len,
                                              uint32_t iter, uint8_t out_hash[32]);
 
+/* --------------------- v7：客户端配置（XML，三端共用） ---------------------
+ * 解析在 l_4 内核完成（qc_conf_* + l_1/q_xcfg），UI 各端只传路径。
+ * XML 形状见 lib_src/l_4/q_clientcomm/qc_client.h 的注释；节点全可选，缺失即默认。
+ */
+/* 加载 XML 配置。
+     path     : 配置文件路径；NULL 或空串 = 用 vms_config_default_path() 的默认路径
+     out_conf : 输出结构体（调用方分配）
+   返回 VMS_OK；VMS_ERR_INVALID_ARG 入参非法；VMS_ERR_NOT_FOUND 文件不存在；
+        VMS_ERR_INTERNAL XML 解析失败（路径写错与语法错已在此前区分开）。
+   注意：本函数**不做业务校验**（host/pubkey 是否齐全），校验用 vms_config_validate。 */
+VMS_API int32_t VMS_CALL vms_load_config(const char* path, vms_client_conf* out_conf);
+/* 三端默认配置文件路径。查找顺序：环境变量 VMS_CLIENT_CONF -> 平台惯例
+   （Win %LOCALAPPDATA%\vms\ / Linux ~/.config/vms/ / macOS ~/Library/Application Support/vms/）。
+   out_path 写入以 '\0' 结尾的路径；返回 VMS_OK 或负错误码。 */
+VMS_API int32_t VMS_CALL vms_config_default_path(char* out_path, size_t cap);
+/* 业务校验：返回 VMS_OK 合法；>0 为第一个不合法项编号
+   （1=host 2=port 3=pubkey 4=pbkdf2_iter 5=knock 缺密钥 6=push.knock 缺密钥
+    7=push.port 越界）；err 回填人类可读原因（不含口令）。 */
+VMS_API int32_t VMS_CALL vms_config_validate(const vms_client_conf* conf,
+                                             char* err, size_t err_cap);
+/* 清零敏感字段（口令 / OTP）并整体归零。 */
+VMS_API void    VMS_CALL vms_config_free(vms_client_conf* conf);
+/* 用配置直接登录（内部把 vms_client_conf 转成 vms_credentials 后走 vms_login）。
+   密码为空时返回 VMS_ERR_INVALID_ARG —— 正式环境应由 UI 弹登录框补齐后调 vms_login。 */
+VMS_API int32_t VMS_CALL vms_login_with_config(vms_context* ctx, const vms_client_conf* conf);
+
 /* --------------------------------- 数据 ---------------------------------- */
 /* 全量统计。
  * 语义（M2 起）：**已登录**时向后台发一次 BIZ_QUERY(biz_type=stats) 取真实数据并更新缓存；
@@ -387,8 +503,41 @@ VMS_API int32_t VMS_CALL vms_get_companies(const vms_context* ctx,
 VMS_API int32_t VMS_CALL vms_query_vehicles(const vms_context* ctx, const vms_query* q,
                                             vms_vehicle* buf, size_t cap, size_t* out_count);
 /* -------------------------------- 实时推送 -------------------------------- */
+/* 轨迹订阅（M5 前的 mock 通道；M5 起真实推送走 vms_push_start，本函数保留给
+   无后端场景的本地 mock 演示）。 */
 VMS_API int32_t VMS_CALL vms_subscribe(vms_context* ctx, vms_push_cb cb, void* user_data);
 VMS_API int32_t VMS_CALL vms_unsubscribe(vms_context* ctx);
+
+/* v8（M5）：启动真实推送长连接（第二条独立 TCP）。
+ * 前置：已登录（ctx 处于登录态）；推送连接会**自行完成 SPA 敲门 + SM2 握手 +
+ *       SM4-GCM + 独立 LOGIN**（Token 绑定 channel_id，命令连接的 Token 在推送
+ *       连接上验不过，必须重登），随后发 PUSH_BEGIN 通知服务端建立推送会话。
+ * password： transient 口令，仅在建连/重连的 LOGIN 时使用，用完即清零 —— 内核不存。
+ *       重连时若 UI 未随调用提供，则经 vms_set_relogin_callback 注册的回调索取。
+ * otp：动态口令（无则空串/"000000"）。
+ * 连不上真实推送服务时**不**返回失败：native 转入本地 mock 退化（见 vms_subscribe），
+ * UI 照常能动；只有参数非法（未登录 / password 空）才返回错误码。
+ * 返回 VMS_OK；<0 = 本地错误（未登录、参数非法）。 */
+VMS_API int32_t VMS_CALL vms_push_start(vms_context* ctx, const char* password,
+                                        const char* otp);
+/* 停止推送长连接（幂等）。订阅集合**保留**：下次 vms_push_start 重连后自动全量重放；
+   要连根清（登出/断开连接）走 vms_logout / vms_disconnect —— 会话关闭时推送对象
+   随命令会话一并销毁。
+   注意：不重新登录而重复调用 vms_push_start，将沿用首次建连的 OTP。 */
+VMS_API int32_t VMS_CALL vms_push_stop(vms_context* ctx);
+
+/* v8（M5）：增量订阅（车辆树勾选/取消时调用）。
+ * op: 1=ADD / 2=REMOVE（与 Q_PUSH_OP_* 一致）；ids 为车辆主键字符串数组
+ * （d_vehicleinfo.vehicle_id，"车牌+颜色"）；n 为个数。
+ * 大集合自动分片（每帧 <= Q_PUSH_SHARD_MAX 个 ID），调用方无需手动分批。
+ * 未启动推送时仅记录到本地订阅集合（启动/重连后会自动重放），返回 VMS_OK。 */
+VMS_API int32_t VMS_CALL vms_push_subscribe_delta(vms_context* ctx, int32_t op,
+                                                  const char* const* ids, size_t n);
+
+/* v8（M5）：注册报警回调（与轨迹回调 vms_subscribe 相互独立）。 */
+VMS_API int32_t VMS_CALL vms_set_alarm_callback(vms_context* ctx, vms_alarm_cb cb,
+                                                void* user_data);
+
 VMS_API int32_t VMS_CALL vms_set_log_callback(vms_context* ctx, vms_log_cb cb, void* user_data);
 
 /* -------------------------------- 错误详情 -------------------------------- */

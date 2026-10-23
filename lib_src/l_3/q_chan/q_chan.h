@@ -83,6 +83,16 @@ extern "C"
 #define Q_CHAN_CMD_VIDEO_OPEN 0x0030u
 #define Q_CHAN_CMD_LOGOUT 0x0040u
 
+/* ---------- M5 推送域（第二条独立长连接，独立 seq 空间） ----------
+ * 推送连接与命令连接是两条独立 TCP：各自握手、各自 seq 窗口、各自重连。
+ * 均只在 AUTHED 态使用（PUSH_BEGIN 之前本连接要先完成自己的 LOGIN ——
+ * Token 绑定 channel_id，命令连接的 Token 在推送连接上验不过，必须重登）。
+ * 线缆负载 TLV 见 include_ipc_proto.h 的 Q_IPC_T_PUSH_*。 */
+#define Q_CHAN_CMD_PUSH_BEGIN     0x0050u /* C→S：标记本连接为推送会话（登录成功后发一次） */
+#define Q_CHAN_CMD_PUSH_SUB_DELTA 0x0051u /* C→S：增量订阅 ADD/REMOVE（大集合分多帧，见 7.6） */
+#define Q_CHAN_CMD_PUSH_TRAJ      0x0052u /* S→C：轨迹点（事件驱动，无固定节奏） */
+#define Q_CHAN_CMD_PUSH_ALARM     0x0053u /* S→C：报警事件（按用户组织子树过滤） */
+
     /* ---------- 连接状态机 ---------- */
     typedef enum
     {

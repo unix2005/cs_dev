@@ -130,7 +130,11 @@ COMMON_CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=0 \
  -Wall -Wextra -Wcast-align -Wwrite-strings -Wpointer-arith \
  -Wstrict-prototypes -Wmissing-prototypes -Wunreachable-code \
  -Wformat -Werror=format-security -Wshadow -Wundef \
- -D_THREAD_SAFE -D_Q_SYS_WINDOWS -fno-common"
+ -D_THREAD_SAFE -D_Q_SYS_WINDOWS -DLIBXML_STATIC -fno-common"
+#  -DLIBXML_STATIC：libxml2 头文件在 Windows 上默认把 API 声明成
+#   __declspec(dllimport)，不定义此项时编译出的对象永远要求 libxml2-2.dll 在场。
+#   定义后可用 libxml2.a 静态链进产物 —— 客户端要分发到用户机器，
+#   少带一个 DLL 的表现是"vms_core.dll 加载失败"且错误信息不提 libxml2，极难排查。
 
 INC_FLAGS="-I. -I$W_SOFT_HOME/include -I$W_SOFT_HOME/tongsuo/include \
  -I$W_CJSON_INC -I$W_SHIM_DIR -I$W_LIBXML_DIR/include -I$W_LIBXML_DIR/include/libxml2"
@@ -144,7 +148,7 @@ export RANLIB="$RANLIB_BIN"
 # 故每个 DLL 显式链接其下层静态库（lib/ 下已产出的 .a）+ 系统库。
 SYS_LIBS="-lpthread -lws2_32 -lbcrypt"   # bcrypt: q_rand 在 Windows 用 BCryptGenRandom
 CRY_LIBS="-L$W_TONGSUO_LIB -lcrypto"
-XML_LIBS="-L$W_LIBXML_DIR/lib -lxml2 -lz -llzma -liconv -lcharset"
+XML_LIBS="-L$W_LIBXML_DIR/lib -Wl,-Bstatic -lxml2 -lz -llzma -liconv -lcharset -Wl,-Bdynamic"
 
 dll_deps() {
     case "$1" in
