@@ -24,6 +24,7 @@
  */
 #include "srv_netd.h"
 
+#include <errno.h>
 #include <pthread.h>
 
 /* 推送帧缓冲：单帧明文 <= NETD_PLAIN_MAX（与 conn_worker 同口径）；
@@ -225,7 +226,14 @@ static void *push_reader_thread(void *arg)
         size_t   used = 0u;
 
         if (push_ipc_recv_frame(c->push.fd, buf, PUSH_FRAME_MAX, &flen) != 0)
-            break;                      /* 超时（外层 while 续等）/ EOF / 错误 */
+        {
+            /* 超时（EAGAIN）是常态而非故障：订阅为空（还没订 / 已全部 REMOVE）时
+               pushd 本来就不发帧，与客户端 qc_push_thread "无数据是常态" 同策略。
+               只有真 EOF/错误才拆链 —— 否则一个订了空集的客户端 10s 后被误杀。 */
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            break;                  /* EOF / 错误：UDS 链路已断 */
+        }
 
         while (off < flen)
         {

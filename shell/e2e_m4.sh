@@ -62,13 +62,23 @@ trap cleanup EXIT
 log()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 die()  { printf '\033[31m失败: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# 就绪判定必须看**内核监听态**而不是"能连上"：nftables 对 netd 端口有 drop 规则，
+# 未敲门时 /dev/tcp 探测会被静默丢包，每次 connect 阻塞 ~127s（SYN 重传），
+# 60 次重试能把脚本挂住几小时（M5 首次联调真实踩中：服务全就绪，脚本卡在探测）。
 wait_port() {
     local port="$1" name="$2" i
     for i in $(seq 1 60); do
-        if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then exec 3<&-; return 0; fi
+        if command -v ss >/dev/null 2>&1; then
+            if ss -tln 2>/dev/null | awk '{print $4}' | grep -q ":${port}\$"; then
+                return 0
+            fi
+        elif (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+            exec 3<&-
+            return 0
+        fi
         sleep 0.1
     done
-    die "${name} 未能在 ${port} 就绪（见 ${CONF_DIR}/${name}.log）"
+    die "${name} 未能在 ${port} 监听（见 ${CONF_DIR}/${name}.log）"
 }
 
 # ---------------------------------------------------------------- 1. 编译 UT
