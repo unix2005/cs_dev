@@ -64,13 +64,46 @@ internal sealed class NativeVehicleDataSource : IVehicleDataSource
     /// <summary>M5：启动真实推送长连接。vms_push_start 阻塞（敲门/握手/登录多往返），
     /// 必须放后台线程；连不上真实服务时 native 转本地 mock 退化、不抛错。</summary>
     public Task StartPushAsync(string password, string? otp = null)
-        => Task.Run(() => _client.PushStart(password, otp), CancellationToken.None);
+        => Task.Run(() =>
+        {
+            var rc = _client.PushStart(password, otp);
+            try
+            {
+                var dir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client");
+                System.IO.Directory.CreateDirectory(dir);
+                var si = _client.GetSessionStatus();
+                System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "trace.log"),
+                    $"[{DateTime.Now:HH:mm:ss.fff}] push_start rc={rc} state={si.State} pushConnected={si.PushConnected} subs={si.PushSubs}\n");
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    System.IO.File.AppendAllText(
+                        System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client", "trace.log"),
+                        $"[{DateTime.Now:HH:mm:ss.fff}] push_start trace ex: {ex.Message}\n");
+                }
+                catch { }
+            }
+        }, CancellationToken.None);
 
     /// <summary>M5：停止推送长连接（幂等）。订阅集合保留，下次重连自动重放。</summary>
     public void StopPush() => _client.PushStop();
 
     /// <summary>M5：增量订阅（车辆树勾选/取消）。大集合 native 端自动分片。</summary>
-    public void SubscribeDelta(int op, IReadOnlyList<string> ids) => _client.SubscribeDelta(op, ids);
+    public void SubscribeDelta(int op, IReadOnlyList<string> ids)
+    {
+        try
+        {
+            var head = string.Join(",", ids.Take(8));
+            System.IO.File.AppendAllText(
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client", "trace.log"),
+                $"[{DateTime.Now:HH:mm:ss.fff}] subscribe op={op} n={ids.Count} ids={head}{(ids.Count > 8 ? ",…" : "")}\n");
+        }
+        catch { }
+        _client.SubscribeDelta(op, ids);
+    }
 
     /// <summary>是否已完成真实后台登录（false = 数据仍是 native 内置 Mock）。</summary>
     public bool IsLoggedIn => _client.IsLoggedIn;
@@ -81,5 +114,10 @@ internal sealed class NativeVehicleDataSource : IVehicleDataSource
     /// </summary>
     public Task<VmsCoreClient.LoginResult> LoginAsync(LoginOptions opt, CancellationToken ct = default)
         => Task.Run(() => _client.Login(opt), ct);
+
+    /// <summary>M5：用配置文件登录（会把 push_host/push_port 写进上下文，推送才连推送栈）。</summary>
+    public Task<VmsCoreClient.LoginResult> LoginWithConfigAsync(string configPath, CancellationToken ct = default)
+        => Task.Run(() => _client.LoginWithConfig(configPath), ct);
+
     public void Dispose() => _client.Dispose();
 }

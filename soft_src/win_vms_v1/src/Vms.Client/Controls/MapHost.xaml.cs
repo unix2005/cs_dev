@@ -18,10 +18,10 @@ public sealed partial class MapHost : UserControl
 {
     private const string VirtualHost = "vms.local";
 
-    /// <summary>默认视野（GCJ-02），与现有系统一致。</summary>
-    private const double DefaultLon = 113.572906;
-    private const double DefaultLat = 42.443101;
-    private const int DefaultZoom = 8;
+    /// <summary>默认视野（GCJ-02）：以北京为中心，初始缩放 10（约 10 公里比例尺档）。</summary>
+    private const double DefaultLon = 116.397428;
+    private const double DefaultLat = 39.90923;
+    private const int DefaultZoom = 10;
 
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
@@ -74,6 +74,22 @@ public sealed partial class MapHost : UserControl
     {
         HintText = text;
         StatusChanged?.Invoke(this, text);
+    }
+
+    private DateTime _mapTraceNext = DateTime.MinValue;
+
+    /// <summary>临时排障打点：地图/WebView 侧一律写到 trace.log，便于无 GUI 时定位"地图上没点"。</summary>
+    internal static void Trace(string text)
+    {
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Vms.Client");
+            Directory.CreateDirectory(dir);
+            File.AppendAllText(Path.Combine(dir, "trace.log"),
+                $"[{DateTime.Now:HH:mm:ss.fff}] map: {text}\n");
+        }
+        catch { }
     }
 
     // ------------------------------- 初始化 -------------------------------
@@ -135,14 +151,21 @@ public sealed partial class MapHost : UserControl
                     $"window.__vmsAmapJsCode={JsonSerializer.Serialize(jsCode)};");
             }
 
+            // 页面加载结果也要可见：404 / 网络失败时页面里根本没有 JS 在跑，
+            // 表现是"既没有 ready 也没有 error"，光看消息是查不出来的。
+            MapView.CoreWebView2.NavigationCompleted += (_, e) =>
+                Trace($"导航完成 success={e.IsSuccess} http={(int)e.HttpStatusCode} err={e.WebErrorStatus}");
+
             MapView.CoreWebView2.Navigate($"https://{VirtualHost}/map.html");
 
             MapView.Visibility = Visibility.Visible;
             FallbackLayer.Visibility = Visibility.Collapsed;
             _mapReady = true;
+            Trace("webview 已创建并导航到 map.html");
         }
         catch (Exception ex)
         {
+            Trace($"初始化失败：{ex.Message}");
             ShowFallback($"WebView2 不可用，已降级为占位层：{ex.Message}");
         }
     }
@@ -166,6 +189,7 @@ public sealed partial class MapHost : UserControl
         FallbackLayer.Visibility = Visibility.Visible;
         FallbackReason.Text = reason;
         RaiseStatus("地图未启用（占位模式）");
+        Trace($"降级：{reason}");
         System.Diagnostics.Debug.WriteLine($"[MapHost] 降级：{reason}");
     }
 
@@ -236,18 +260,33 @@ public sealed partial class MapHost : UserControl
         var payload = new
         {
             type = "vehicles",
-            items = rows.Select(r => new
-            {
-                id = r.Id,
-                plate = r.Plate,
-                lon = r.Lon,
-                lat = r.Lat,
-                speed = r.SpeedText,
-                online = r.Online,
-                alarm = r.Alarm != AlarmFlags.None,
-                location = r.Location,
-            }).ToArray(),
+            items = rows
+                .Where(r => r.Id != 0 || !string.IsNullOrEmpty(r.VehicleId))   // 没有主键的行画不了，也无法点击回传
+                .Where(r => r.Lon != 0d || r.Lat != 0d)                          // (0,0) 是无效坐标，会落到几内亚湾
+                .Select(r => new
+                {
+                    // 键必须按车辆区分：轨迹推送帧的 id 为 0，若直接用 id 会让所有车共用一个图钉。
+                    id = string.IsNullOrEmpty(r.VehicleId) ? r.Id.ToString() : r.VehicleId,
+                    uid = r.Id,
+                    plate = r.Plate,
+                    lon = r.Lon,
+                    lat = r.Lat,
+                    speed = r.SpeedText,
+                    online = r.Online,
+                    alarm = r.Alarm != AlarmFlags.None,
+                    location = r.Location,
+                }).ToArray(),
         };
+
+        // 打点内容必须可观测：在哪一步丢的（没坐标/没主键/地图未就绪）要能从日志区分
+        var now = DateTime.Now;
+        if (now >= _mapTraceNext)
+        {
+            _mapTraceNext = now.AddSeconds(15);
+            var first = payload.items.Length > 0 ? payload.items[0] : null;
+            Trace($"markers ready={_mapReady} in={rows.Count} out={payload.items.Length}" +
+                  (first is null ? "" : $" first={first.id} ({first.lon:F6},{first.lat:F6}) plate={first.plate}"));
+        }
 
         Post(payload);
     }
@@ -301,8 +340,7 @@ public sealed partial class MapHost : UserControl
         try
         {
             json = args.WebMessageAsJson;   // 只取值，不碰任何 UI
-        }
-        catch (Exception ex)
+        }        catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[MapHost] 读取 WebMessage 失败：{ex.Message}");
             return;
@@ -310,7 +348,6 @@ public sealed partial class MapHost : UserControl
 
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, () => HandleWebMessage(json));
     }
-
     /// <summary>日志回传限频：地图页可能一次刷几十条，全量转 UI 没有意义，还会把消息队列堆满。</summary>
     private int _consoleBudget = 8;
     private DateTime _consoleWindowStart = DateTime.UtcNow;
@@ -340,6 +377,7 @@ public sealed partial class MapHost : UserControl
             {
                 case "ready":
                     RaiseStatus("地图已就绪 · 等待车辆数据");
+                    Trace("JS ready（高德 SDK 已加载成功）");
                     MapReady?.Invoke(this, EventArgs.Empty);
                     break;
 
@@ -365,6 +403,7 @@ public sealed partial class MapHost : UserControl
                 case "error":
                     var stage = root.TryGetProperty("stage", out var st) ? st.GetString() : "unknown";
                     var msg = root.TryGetProperty("message", out var m) ? m.GetString() : "未知错误";
+                    Trace($"JS error stage={stage} msg={msg}");
                     ShowFallback($"[{stage}] {msg}");
                     break;
             }

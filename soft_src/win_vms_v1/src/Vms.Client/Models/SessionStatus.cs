@@ -12,11 +12,17 @@ namespace Vms.Client.Models;
 /// <param name="Reconnects">重建连接成功次数</param>
 /// <param name="Relogins">自动重新登录成功次数</param>
 /// <param name="Detail">最近一次事件描述（UTF-8）</param>
+/// <param name="PushConnected">M5：推送长连接是否就绪（1 = 正在收轨迹/报警）</param>
+/// <param name="PushSubs">M5：当前订阅的车辆数</param>
 public sealed record SessionStatus(int State, uint Attempts, uint HbSent, uint HbFailed,
-                                   uint Reconnects, uint Relogins, string Detail)
+                                   uint Reconnects, uint Relogins, string Detail,
+                                   uint PushConnected = 0, uint PushSubs = 0)
 {
     public bool IsOnline  => State == 1;
     public bool IsDown    => State is 2 or 3 or 4;
+
+    /// <summary>M5：推送通道真的连上（不是 mock 退化）。</summary>
+    public bool IsPushConnected => PushConnected != 0;
 
     /// <summary>状态栏展示文案（运维视角，不用英文枚举名）。</summary>
     public string StateText => State switch

@@ -17,6 +17,8 @@ public sealed class VehicleFeed : ObservableCollection<VehicleRow>
 {
     private readonly IVehicleDataSource _source;
     private readonly Dictionary<uint, VehicleRow> _index = new(512);
+    /// <summary>按车辆主键字符串建立第二索引：轨迹推送帧的 id 恒为 0，只能靠它定位。</summary>
+    private readonly Dictionary<string, VehicleRow> _keyIndex = new(512);
 
     public VehicleFeed(IVehicleDataSource source, VehicleQuery query)
     {
@@ -40,6 +42,7 @@ public sealed class VehicleFeed : ObservableCollection<VehicleRow>
     {
         Clear();
         _index.Clear();
+        _keyIndex.Clear();
         TotalCount = 0;
         Query.Offset = 0;
         await LoadMoreAsync(ct);
@@ -61,6 +64,7 @@ public sealed class VehicleFeed : ObservableCollection<VehicleRow>
             foreach (var row in rows)
             {
                 _index[row.Id] = row;
+                if (!string.IsNullOrEmpty(row.VehicleId)) _keyIndex[row.VehicleId] = row;
                 Add(row);
             }
         }
@@ -71,13 +75,35 @@ public sealed class VehicleFeed : ObservableCollection<VehicleRow>
         }
     }
 
+    /// <summary>
+    /// 把一帧推送里的行定位到已加载窗口内的同一台车。
+    /// 必须优先按 <see cref="VehicleRow.VehicleId"/> 匹配：轨迹帧来自 native
+    /// <c>vms_on_push_traj</c>，它只填 vehicle_id / 坐标 / 时间，<c>id</c> 恒为 0，
+    /// 而查询行的 id 是 <c>key_id(seq, row+1)</c> 这样的非零序号 —— 按 id 找必然落空。
+    /// </summary>
+    public VehicleRow? Resolve(VehicleRow incoming)
+    {
+        if (!string.IsNullOrEmpty(incoming.VehicleId) &&
+            _keyIndex.TryGetValue(incoming.VehicleId, out var byKey))
+            return byKey;
+        if (incoming.Id != 0 && _index.TryGetValue(incoming.Id, out var byId))
+            return byId;
+        return null;
+    }
+
+    /// <summary>按车辆主键字符串取实时行（树上双击聚焦用：树节点坐标是查询时的静态值，
+    /// 实时位置在已加载窗口里的这一行上）。不在窗口内返回 null。</summary>
+    public VehicleRow? FindByKey(string? vehicleId)
+        => !string.IsNullOrEmpty(vehicleId) && _keyIndex.TryGetValue(vehicleId, out var r) ? r : null;
+
     /// <summary>应用一帧实时推送。必须在 UI 线程调用。</summary>
     public int ApplyPush(IReadOnlyList<VehicleRow> batch)
     {
         var applied = 0;
         foreach (var incoming in batch)
         {
-            if (!_index.TryGetValue(incoming.Id, out var existing)) continue; // 不在可见窗口，忽略
+            var existing = Resolve(incoming);
+            if (existing is null) continue;   // 不在可见窗口，忽略
             existing.CopyFrom(incoming);
             applied++;
         }

@@ -2,6 +2,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Vms.Client.Diagnostics;
 using Vms.Client.Models;
@@ -64,10 +65,9 @@ public sealed partial class CompanyTreePanel : UserControl
     {
         switch (args.InvokedItem)
         {
-            case VehicleNode vehicle:
-                // 点车辆行 = 仅把该车居中到地图（聚焦），不改变数据范围。
-                // 勾选/取消勾选（数据联动）由行内复选框负责，二者分离，互不干扰。
-                Post(async () => ViewModel.Monitor.FocusVehicle(vehicle));
+            case VehicleNode:
+                // 单击不再联动地图（避免每次点行都拽视野）。聚焦改由车辆行的 DoubleTapped 触发，
+                // 规则与「定位数据」页签里的双击一致：未勾选则先勾选，再把地图居中到该车。
                 break;
             case CompanyNode company:
                 // 点组织节点 = 仅展开/收起（方便看下级单位），<b>不再加载定位数据</b>。
@@ -78,6 +78,34 @@ public sealed partial class CompanyTreePanel : UserControl
                 Post(async () => { company.IsExpanded = true; });
                 break;
         }
+    }
+
+    /// <summary>
+    /// 树上双击车辆行 = 聚焦该车，规则与数据栏双击保持一致：
+    ///   · 未勾选 → 先勾选（加入定位数据联动范围），再聚焦；
+    ///   · 已勾选 → 直接聚焦，不重复勾选。
+    /// 勾选走程序化赋值（不触发 CheckBox.Click），沿父链重算三态祖先。
+    /// </summary>
+    private void VehicleRow_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not VehicleNode vehicle) return;
+
+        Post(async () =>
+        {
+            bool justChecked = false;
+            if (vehicle.IsChecked != true)
+            {
+                vehicle.IsChecked = true;
+                vehicle.RecomputeAncestors();
+                await ViewModel.Monitor.UpdateVehicleSelectionAsync(vehicle, true);
+                justChecked = true;
+            }
+            // 刚勾选的车：订阅才发出、首帧轨迹一般 1 秒左右才到。若立刻聚焦，
+            // 数据栏里它的行还停在查询时的静态坐标（恰好可能落在别的车附近），
+            // 表现就是"双击A车、地图跳到B车"。等首帧把实时坐标写进来再聚焦。
+            if (justChecked) await Task.Delay(1200);
+            ViewModel.Monitor.FocusVehicle(vehicle);
+        });
     }
 
     /// <summary>「全部车辆」：清空组织过滤与检索，回到全局视图。</summary>

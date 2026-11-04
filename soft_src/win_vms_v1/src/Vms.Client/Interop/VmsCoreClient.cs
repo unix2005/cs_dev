@@ -236,6 +236,54 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         return new LoginResult(false, rc, msg);
     }
 
+    /// <summary>
+    /// 用**配置文件**直接登录（v8/M5 必经路径）。
+    ///
+    /// 与 <see cref="Login"/> 的差别：这条路径会调用 native 的 <c>vms_login_with_config</c>，
+    /// 它除了登录，还会把配置里的 <c>push_host</c> / <c>push_port</c> / <c>push_knock</c>
+    /// 写进上下文。**只调 vms_login 的话这三个字段永远是空的**，推送会回退到命令连接的
+    /// host/port（本工程命令栈 18099、推送栈 18098），表现为"推送连上了但连的是命令端口、
+    /// 收不到任何轨迹/报警"，而且不报错——很难查。
+    /// </summary>
+    public LoginResult LoginWithConfig(string configPath)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var rc = NativeMethods.vms_load_config(configPath, out var conf);
+        if (rc != 0)
+            return new LoginResult(false, rc, $"加载配置失败（{configPath}）：{NativeMethods.DescribeError(_ctx, rc)}");
+
+        string pwd;
+        uint iter;
+        try
+        {
+            /* 口令/迭代次数要留给 keeper 重登用，必须在 vms_config_free 之前取走。
+               局部变量本身已固定，直接取地址即可（不能套 fixed，会报 CS0213）。 */
+            NativeClientConf* p = &conf;
+            pwd  = Utf8.Read(p->Password, NativeClientConf.PassMax);
+            iter = p->Pbkdf2Iter;
+            rc = NativeMethods.vms_login_with_config(_ctx, in conf);
+        }
+        finally
+        {
+            NativeMethods.vms_config_free(ref conf);   /* native 侧结构和口令副本一并清零 */
+        }
+
+        _loggedIn = rc == 0;
+        if (rc == 0)
+        {
+            _password   = pwd;
+            _pbkdf2Iter = iter;
+            return new LoginResult(true, 0, "登录成功");
+        }
+
+        _password = null;
+        var msg = rc > 0
+            ? $"服务端拒绝登录：结果码 {rc}" + (rc == 3 ? "（Token/凭据问题，需重新登录）" : "")
+            : NativeMethods.DescribeError(_ctx, rc);
+        return new LoginResult(false, rc, msg);
+    }
+
     public void Logout()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -332,7 +380,8 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         var detail = Utf8.Read(d, NativeSessionInfo.DetailMax);
 
         return new SessionStatus(s.State, s.Attempts, s.HbSent, s.HbFailed,
-                                 s.Reconnects, s.Relogins, detail);
+                                 s.Reconnects, s.Relogins, detail,
+                                 s.PushConnected, s.PushSubs);
     }
 
     /// <summary>
@@ -683,8 +732,9 @@ internal sealed unsafe class VmsCoreClient : IDisposable
         _ => ("其他", "三级"),
     };
 
-    /// <summary>把车辆主键字符串稳定映射成 uint（用于 AlarmRecord.VehicleId / 去重键）。</summary>
-    private static uint StableHash(string s)
+    /// <summary>把车辆主键字符串稳定映射成 uint（用于 AlarmRecord.VehicleId / 去重键）。
+    /// 轨迹回调与报警回调必须用同一个映射，否则同一条报警会来自两路、各算一个键。</summary>
+    internal static uint StableHash(string s)
     {
         uint h = 2166136261u;
         foreach (var c in s)

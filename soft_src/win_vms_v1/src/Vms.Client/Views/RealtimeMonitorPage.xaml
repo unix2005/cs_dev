@@ -86,7 +86,7 @@
             <!-- 地图 ↔ 数据页签：可拖拽 -->
             <controls:SplitterBar Grid.Row="1" Orientation="Horizontal" />
 
-            <controls:DataTabsPanel Grid.Row="2" />
+            <controls:DataTabsPanel x:Name="DataTabs" Grid.Row="2" />
         </Grid>
     </Grid>
 </Page>

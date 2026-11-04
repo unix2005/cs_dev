@@ -312,9 +312,32 @@ public sealed partial class DataTabsPanel : UserControl
         if (!string.IsNullOrWhiteSpace(text) && CopyToClipboard(text) is { } err) HintText.Text = err;
     }
 
-    /// <summary>左键点击报警数据行：同定位表（复制 + 列高亮）。</summary>
-    private void AlarmRow_Tapped(object sender, TappedRoutedEventArgs e)
+    /// <summary>双击定位数据行 → 地图聚焦该车位置。由页面转发给地图宿主。</summary>
+    public event EventHandler<PositionRecord>? VehicleFocusRequested;
+
+    /// <summary>
+    /// 双击"定位数据"某一行：请地图把视野移到该车当前位置并放大。
+    /// 与单击的"复制单元格/列高亮"互不干扰 —— 双击的第二下会先走 Tapped，
+    /// 但复制只是把文本进剪贴板，不影响视野，用户不会察觉。
+    /// </summary>
+    private void PositionRow_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
+        if (IsCheckBox(e.OriginalSource as DependencyObject)) return;
+        if ((sender as FrameworkElement)?.DataContext is not PositionRecord row) return;
+
+        if (row.Lon == 0d || row.Lat == 0d)
+        {
+            HintText.Text = $"{row.Plate}：暂无有效经纬度，无法在地图上聚焦";
+            return;
+        }
+
+        HintText.Text = $"已聚焦 {row.Plate}（{row.LonText}, {row.LatText}）";
+        VehicleFocusRequested?.Invoke(this, row);
+        e.Handled = true;
+    }
+
+    /// <summary>左键点击报警数据行：同定位表（复制 + 列高亮）。</summary>
+    private void AlarmRow_Tapped(object sender, TappedRoutedEventArgs e)    {
         if (IsCheckBox(e.OriginalSource as DependencyObject)) return;
 
         var tb = FindTextBlock(e.OriginalSource as DependencyObject);

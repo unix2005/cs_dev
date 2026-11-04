@@ -84,6 +84,18 @@ public static class VehicleDataSourceFactory
         return r.Success ? r.Config!.Summary : r.Error;
     }
 
+    /// <summary>
+    /// 解析实际要用的配置文件路径（显式传参 &gt; VMS_CLIENT_CONF &gt; native 平台默认）。
+    /// 登录要走 vms_login_with_config 时必须拿到这个路径，否则推送寻址会是空的。
+    /// </summary>
+    public static string? ResolveConfigPath(string? configPath = null)
+    {
+        if (!string.IsNullOrWhiteSpace(configPath)) return configPath;
+        var env = Environment.GetEnvironmentVariable(ClientConfigService.PathEnvVar);
+        if (!string.IsNullOrWhiteSpace(env)) return env;
+        return ClientConfigService.DefaultPath();
+    }
+
     private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
 }
 

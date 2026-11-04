@@ -90,11 +90,9 @@ public sealed class VehicleRow : ObservableObject
     /// </summary>
     public void CopyFrom(VehicleRow src)
     {
-        SelfCode = src.SelfCode;
-        Plate = src.Plate;
+        // 实时量：无条件覆盖（本帧就是最新状态）。
         Time = src.Time;
         SpeedKph = src.SpeedKph;
-        Location = src.Location;
         Online = src.Online;
         OfflineSeconds = src.OfflineSeconds;
         Day = src.Day;
@@ -102,6 +100,12 @@ public sealed class VehicleRow : ObservableObject
         Alarm = src.Alarm;
         Lon = src.Lon;
         Lat = src.Lat;
+
+        // 身份/描述字段：轨迹推送帧（native vms_on_push_traj）只带 vehicle_id 与坐标/时间，
+        // plate / self_code / location 恒为空串 —— 空值绝不能把查询结果里的真值抹掉。
+        if (!string.IsNullOrEmpty(src.SelfCode)) SelfCode = src.SelfCode;
+        if (!string.IsNullOrEmpty(src.Plate)) Plate = src.Plate;
+        if (!string.IsNullOrEmpty(src.Location)) Location = src.Location;
     }
 }
 

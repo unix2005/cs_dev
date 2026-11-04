@@ -54,6 +54,17 @@
     else console.log('[vms]', obj);
   };
 
+  // 未捕获异常必须回传宿主：否则"地图能画出来、但图钉一个不显示"这种问题
+  // 在桌面端完全看不见原因（异常只落在 DevTools 里）。
+  window.addEventListener('error', function (e) {
+    try {
+      window.__vmsPost({
+        type: 'error', stage: 'js',
+        message: String(e.message) + ' @' + String(e.filename || '').split('/').pop() + ':' + (e.lineno || 0)
+      });
+    } catch (x) { }
+  });
+
   // 2) 劫持 console：高德 SDK 被拒时的真实原因（INVALID_USER_SCODE 等）只打在 console 里，
   //    不劫持的话桌面端根本看不到，只能猜。必须在加载 SDK **之前**装好。
   (function () {
@@ -143,15 +154,28 @@
   }
 
   function start() {
-    // 默认视野：与现有系统一致（GCJ-02）。高德用 [经度, 纬度] 顺序，别写反。
+    // 默认视野：以北京为中心，初始缩放 10（比例尺约 10 公里档）。
+    // 注：地图视野的"归位/聚焦"只由宿主显式触发（双击数据行 / 点树上车辆 / 点图钉），
+    // 勾选车辆只更新图钉位置，绝不自动平移，避免值班界面被晃。
     var map = new AMap.Map('map', {
       viewMode: '2D',
-      zoom: 8,
-      center: [113.572906, 42.443101],
+      zoom: 10,
+      center: [116.397428, 39.90923],
       resizeEnable: true
     });
 
-    map.addControl(new AMap.Scale({ position: 'LB' }));
+    // 比例尺控件：JS API 2.0 里 AMap.Scale 是**插件**，没通过 AMap.plugin 加载时
+    // `new AMap.Scale()` 会抛异常。而这一抛会把后面「订阅宿主消息 + 上报 ready」整个跳过，
+    // 表现就是"地图画出来了，但一颗图钉都不显示、状态栏永远停在等待数据"。
+    // 所以这里既按规范走 plugin 加载，又把失败当非致命。
+    try {
+      AMap.plugin(['AMap.Scale'], function () {
+        try { map.addControl(new AMap.Scale({ position: 'LB' })); }
+        catch (e) { console.warn('比例尺添加失败：' + e); }
+      });
+    } catch (e) {
+      console.warn('AMap.plugin 不可用，跳过比例尺：' + e);
+    }
 
     // 车辆图标用项目自带的卡通罐车（vms_tanker.png，白底已转透明，放在 WebAssets，由 vms.local 提供）。
     // 状态仍用"圆圈描边颜色"表达（在线蓝 / 离线灰 / 报警红），图标本体保持车型识别度。
@@ -167,6 +191,13 @@
     };
 
     var markers = Object.create(null);   // id -> Marker，用于增量更新而不是整层重建
+    window.__vmsMarkers = markers;       // 诊断用：宿主可取出当前图钉数量/键，确认"点到没画出来"是哪一步
+
+    // ⚠ 顺序很关键：先把「宿主 → 页面」通道接上并立刻上报 ready，再去做任何"装饰性"调用
+    //    （比例尺 / 信息窗 / 右键菜单…）。反过来写的话，某个插件抛一次异常就会让
+    //    消息监听永远注册不上 —— 表现是"地图正常渲染、图钉一颗不显示、状态栏一直等数据"。
+    if (window.__vmsHost) window.__vmsHost.addEventListener('message', onHostMessage);
+    window.__vmsPost({ type: 'ready' });
 
     function styleOf(item) {
       return item.alarm ? 'alarm' : (item.online ? 'online' : 'offline');
@@ -188,6 +219,7 @@
           mk.setPosition(pos);
           mk.setContent(content);
           mk.setTitle(title);
+          mk.__vmsUid = it.uid;
         } else {
           mk = new AMap.Marker({
             position: pos,
@@ -195,6 +227,7 @@
             anchor: 'center',
             title: title
           });
+          mk.__vmsUid = it.uid;
           mk.on('click', makeClickHandler(id));
           map.add(mk);
           markers[id] = mk;
@@ -209,14 +242,20 @@
         var pos = mk.getPosition();
         window.__vmsPost({
           type: 'markerclick',
-          id: id,
+          id: id,                 // 车辆主键字符串（"车牌-颜色"），宿主据此定位车辆
+          uid: mk.__vmsUid,       // 查询行 id（推=""时可能为 0），宿主做兜底匹配
           lon: pos.getLng().toFixed(6),
           lat: pos.getLat().toFixed(6)
         });
-        new AMap.InfoWindow({
-          content: '<div class="pin-label">' + (mk.getTitle() || '') + '</div>',
-          offset: new AMap.Pixel(0, -30)
-        }).open(map, pos);
+        // 信息窗同属可选组件：插件缺失时不能把点击事件本身搞崩
+        try {
+          new AMap.InfoWindow({
+            content: '<div class="pin-label">' + (mk.getTitle() || '') + '</div>',
+            offset: new AMap.Pixel(0, -30)
+          }).open(map, pos);
+        } catch (e) {
+          console.warn('信息窗打开失败：' + e);
+        }
       };
     }
 
@@ -234,28 +273,24 @@
       });
     });
 
-    // 宿主 → 页面
-    if (window.__vmsHost) {
-      window.__vmsHost.addEventListener('message', function (e) {
-        var msg = e.data;
-        if (!msg || !msg.type) return;
-        try {
-          if (msg.type === 'vehicles') {
-            upsert(msg.items || []);
-          } else if (msg.type === 'center') {
-            map.setZoomAndCenter(msg.zoom || 14, [msg.lon, msg.lat]);
-          } else if (msg.type === 'zoom') {
-            map.setZoom(Math.max(3, Math.min(18, map.getZoom() + msg.delta)));
-          } else if (msg.type === 'clear') {
-            for (var k in markers) { map.remove(markers[k]); delete markers[k]; }
-          }
-        } catch (err) {
-          window.__vmsPost({ type: 'error', stage: 'runtime', message: String(err) });
+    // 宿主 → 页面（注册在 start() 早段，见上面 ready 之前那几行）
+    function onHostMessage(e) {
+      var msg = e.data;
+      if (!msg || !msg.type) return;
+      try {
+        if (msg.type === 'vehicles') {
+          upsert(msg.items || []);
+        } else if (msg.type === 'center') {
+          map.setZoomAndCenter(msg.zoom || 14, [msg.lon, msg.lat]);
+        } else if (msg.type === 'zoom') {
+          map.setZoom(Math.max(3, Math.min(18, map.getZoom() + msg.delta)));
+        } else if (msg.type === 'clear') {
+          for (var k in markers) { map.remove(markers[k]); delete markers[k]; }
         }
-      });
+      } catch (err) {
+        window.__vmsPost({ type: 'error', stage: 'runtime', message: String(err) });
+      }
     }
-
-    window.__vmsPost({ type: 'ready' });
   }
 
   // ---- 动态加载 SDK：只有动态创建 <script> 才能拿到 onerror，

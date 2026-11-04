@@ -983,23 +983,19 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
 
         foreach (var row in batch)
         {
+            // 推送帧的 id 为 0（native 轨迹回调只带 vehicle_id/坐标/时间），
+            // 统一经 Feed 解析出"已加载窗口内的同一台车"，后面一律用它的 id 与身份字段。
+            var target = Feed.Resolve(row) ?? row;
+
             // 定位页签内就地更新（命中即改，不重建集合）
-            if (!Diag.SkipPositionUpdate && _posIndex.TryGetValue(row.Id, out var pos))
-                pos.CopyFrom(ToPositionRecord(row));
+            if (!Diag.SkipPositionUpdate && _posIndex.TryGetValue(target.Id, out var pos))
+                pos.CopyFrom(ToPositionRecord(target));
 
             // 报警页签：出现新报警才入队，避免同一条反复刷。
             // 注意这里只"排队"不直接 Insert —— 每帧在集合头部硬插会逼 ListView
             // 反复重排全部索引，攒一小批一起提交对 UI 友好得多。
-            if (!Diag.SkipAlarmInsert && row.HasAlarm)
-            {
-                var key = AlarmKey(row.Id, row.Alarm);
-                if (!_alarmIndex.ContainsKey(key))
-                {
-                    var rec = ToAlarmRecord(row);
-                    _alarmIndex[key] = rec;
-                    _alarmPending.Add(rec);
-                }
-            }
+            if (!Diag.SkipAlarmInsert && target.HasAlarm)
+                AddOrMergeAlarm(ToAlarmRecord(target));
         }
 
         if (_alarmPending.Count > 0) ScheduleAlarmFlush();
@@ -1021,15 +1017,44 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         if (!IsViewActive) return;
 
         foreach (var rec in batch)
-        {
-            var key = AlarmKey(rec.VehicleId, (AlarmFlags)rec.AlarmCode);
-            if (!_alarmIndex.ContainsKey(key))
-            {
-                _alarmIndex[key] = rec;
-                _alarmPending.Add(rec);
-            }
-        }
+            AddOrMergeAlarm(rec);
         if (_alarmPending.Count > 0) ScheduleAlarmFlush();
+    }
+
+    /// <summary>
+    /// 报警入列的唯一入口：同一「车辆主键 + 报警类型」只保留一条。
+    /// 报警有两条独立来源 —— 轨迹帧上的报警位（有实时速度/坐标，无车牌）和
+    /// 原生报警回调（有车牌/地址，无速度）—— 键必须一致，命中时按字段合并补齐，
+    /// 而不是再插一行（否则同一秒会出现"一条有速度、一条速度为 --"的重复行）。
+    /// </summary>
+    private void AddOrMergeAlarm(AlarmRecord rec)
+    {
+        var key = AlarmKey(rec.VehicleId, (AlarmFlags)rec.AlarmCode);
+        if (_alarmIndex.TryGetValue(key, out var existing))
+        {
+            MergeAlarm(existing, rec);
+            return;
+        }
+        _alarmIndex[key] = rec;
+        _alarmPending.Add(rec);
+    }
+
+    /// <summary>两条来源字段互补：只补空，不覆盖已有的真值（属性变更会直接刷新可见行）。</summary>
+    private static void MergeAlarm(AlarmRecord dst, AlarmRecord src)
+    {
+        if (string.IsNullOrEmpty(dst.Plate) && !string.IsNullOrEmpty(src.Plate))
+            dst.Plate = src.Plate;
+        if (string.IsNullOrEmpty(dst.DeviceCode) && !string.IsNullOrEmpty(src.DeviceCode))
+            dst.DeviceCode = src.DeviceCode;
+        if (dst.SpeedKph <= 0.05f && src.SpeedKph > 0.05f)
+            dst.SpeedKph = src.SpeedKph;
+        if (string.IsNullOrEmpty(dst.Address) && !string.IsNullOrEmpty(src.Address))
+            dst.Address = src.Address;
+        if (dst.Lon == 0d && dst.Lat == 0d && (src.Lon != 0d || src.Lat != 0d))
+        {
+            dst.Lon = src.Lon;
+            dst.Lat = src.Lat;
+        }
     }
 
     /// <summary>
@@ -1069,7 +1094,8 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         foreach (var row in Feed.Where(r => r.HasAlarm))
         {
             var rec = ToAlarmRecord(row);
-            _alarmIndex[AlarmKey(row.Id, row.Alarm)] = rec;
+            // 键与推送路径保持同一口径（车辆主键哈希 + 报警枚举），否则重建后还会再插一份。
+            _alarmIndex[AlarmKey(rec.VehicleId, (AlarmFlags)rec.AlarmCode)] = rec;
             Alarms.Add(rec);
         }
         TrimAlarms();
@@ -1197,14 +1223,17 @@ public sealed class RealtimeMonitorViewModel : ObservableObject, IDisposable
         return new AlarmRecord
         {
             Id = (uint)(row.Id * 31 + (uint)row.Alarm),
-            VehicleId = row.Id,
+            // 与报警回调（VmsCoreClient.ToAlarmRecord）用同一套主键映射：
+            // 同一条报警会被"轨迹帧带报警位"和"报警回调"两条路各送一次，
+            // 键不一致就会在面板里出现两行（一行有速度、一行速度为空）。
+            VehicleId = VmsCoreClient.StableHash(row.VehicleId),
             Plate = row.Plate,
-            DeviceCode = $"T{row.Id % 900000 + 100000:D6}",
+            DeviceCode = $"T{VmsCoreClient.StableHash(row.VehicleId) % 900000 + 100000:D6}",
             AlarmCode = (uint)row.Alarm,   // 保留原始枚举值：去重键要用，展示层用 AlarmType 文案
             AlarmTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
             AlarmType = type,
             Level = level,
-            SpeedKph = row.Online ? row.SpeedKph : 0f,
+            SpeedKph = row.SpeedKph,
             Address = row.Location,
             Lon = row.Lon,
             Lat = row.Lat,

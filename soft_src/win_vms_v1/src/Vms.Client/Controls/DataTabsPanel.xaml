@@ -126,6 +126,7 @@
                             -->
                             <Grid Background="Transparent"
                                   Tapped="PositionRow_Tapped"
+                                  DoubleTapped="PositionRow_DoubleTapped"
                                   RightTapped="PositionRow_RightTapped">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="38" />

@@ -64,7 +64,7 @@
 
         <!-- 车辆节点**内容**：复选框(单选/多选) + 车牌 + 次要信息 -->
         <DataTemplate x:Key="VehicleContentTemplate" x:DataType="models:VehicleNode">
-            <Grid Height="28">
+            <Grid Height="28" DoubleTapped="VehicleRow_DoubleTapped">
                 <Grid.ColumnDefinitions>
                     <!-- ⚠ 列最小宽 28：给复选框留出"框体 + 右边距"。
                          ⚠ 这里**故意不设**固定宽度给 CheckBox —— 见下面 CheckBox 的注释：

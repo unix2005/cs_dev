@@ -214,8 +214,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         try
         {
             Trace("auto-login: before LoginAsync");
-            var r = await native.LoginAsync(opt, ct);
-            Trace($"auto-login: after LoginAsync success={r.Success} msg={r.Message}");
+            /* 有配置文件就走 vms_login_with_config：只有它会把 push_host/push_port 写进
+               native 上下文，推送长连接才会真正连到推送栈（否则静默回退命令端口）。 */
+            var confPath = VehicleDataSourceFactory.ResolveConfigPath();
+            var r = string.IsNullOrWhiteSpace(confPath)
+                ? await native.LoginAsync(opt, ct)
+                : await native.LoginWithConfigAsync(confPath, ct);
+            Trace($"auto-login: after LoginAsync success={r.Success} msg={r.Message} viaConfig={!string.IsNullOrWhiteSpace(confPath)}");
             if (r.Success)
             {
                 BackendBadge = $"{_bundle.Source.BackendName} · 已登录";
